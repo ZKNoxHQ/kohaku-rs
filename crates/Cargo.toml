@@ -4,6 +4,7 @@ members = [
     "kv-store",
     "merkle-tree",
     "railgun",
+    "railgun-ledger",
     "tornadocash",
     "tornadocash-circuit",
     "userop-kit",

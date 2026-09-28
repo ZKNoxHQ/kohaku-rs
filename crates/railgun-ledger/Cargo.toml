@@ -1,0 +1,98 @@
+[package]
+name = "kohaku-railgun-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# Native USB HID transport via coins-ledger. Off by default so workspace builds
+# do not require system HID libraries (libudev headers on Linux).
+usb = ["dep:coins-ledger", "dep:tokio"]
+# Native Bluetooth LE transport via btleplug, for Flex/Stax/Nano X. Off by
+# default so workspace builds do not require system BLE stacks (bluez/dbus on
+# Linux). Needs the tokio time+sync features and a futures StreamExt.
+ble = ["dep:btleplug", "dep:uuid", "dep:futures", "dep:tokio", "tokio/time"]
+# Browser WebUSB transport (wasm32 only), for a phone/desktop web build. Uses
+# web-sys navigator.usb; requires --cfg web_sys_unstable_apis.
+webusb = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
+# Browser Web Bluetooth transport (wasm32 only), the cable-free path for
+# Flex/Stax/Nano X on Android Chrome. Same unstable-apis cfg requirement.
+webble = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+    "dep:futures",
+]
+
+[dependencies]
+# common = { workspace = true }
+async-trait = { workspace = true }
+hex = { workspace = true }
+# Aliased so the crate keeps referring to the SDK as `railgun` (workspace
+# inheritance cannot rename a dependency).
+railgun = { package = "kohaku-railgun", path = "../railgun" }
+ruint = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+coins-ledger = { version = "0.13", optional = true }
+btleplug = { version = "0.13", optional = true }
+uuid = { version = "1", optional = true }
+futures = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync"], optional = true }
+
+# webusb / webble (wasm32 browser) transports
+wasm-bindgen = { version = "=0.2.108", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Navigator",
+    # WebUSB from a Web Worker (navigator.usb is exposed there in Chromium)
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    # WebUSB
+    "Usb",
+    "UsbDevice",
+    "UsbDeviceFilter",
+    "UsbDeviceRequestOptions",
+    "UsbConfiguration",
+    "UsbInterface",
+    "UsbAlternateInterface",
+    "UsbEndpoint",
+    "UsbEndpointType",
+    "UsbDirection",
+    "UsbInTransferResult",
+    "UsbOutTransferResult",
+    # Web Bluetooth
+    "Bluetooth",
+    "BluetoothDevice",
+    "BluetoothRemoteGattServer",
+    "BluetoothRemoteGattService",
+    "BluetoothRemoteGattCharacteristic",
+    "RequestDeviceOptions",
+    "BluetoothLeScanFilterInit",
+    "Event",
+    "EventTarget",
+] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
+[dev-dependencies]
+# The smoke examples verify the device's EdDSA-Poseidon signature locally;
+# uncomment once the crypto crate is wired into this workspace.
+# crypto = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-ff = { workspace = true }
+num-bigint = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[example]]
+name = "smoke"
+required-features = ["usb"]
+
+[[example]]
+name = "ble_smoke"
+required-features = ["ble"]
