@@ -113,7 +113,7 @@ impl UtxoIndexer {
             .map(|a| {
                 let signer = a.signer();
                 crate::poi::recovery::RecoveryAccount {
-                    spending_pubkey: signer.spending_key().public_key(),
+                    spending_pubkey: signer.spending_public_key(),
                     nullifying_key: signer.viewing_key().nullifying_key(),
                     unspent: a.unspent(),
                     spent: a.spent(),

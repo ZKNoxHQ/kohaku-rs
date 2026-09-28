@@ -5,20 +5,42 @@ use thiserror::Error;
 
 use crate::{
     account::{address::RailgunAddress, chain::ChainId},
-    crypto::keys::{SpendingKey, SpendingSignature, ViewingKey},
+    crypto::keys::{
+        MasterPublicKey, SpendingKey, SpendingPublicKey, SpendingSignature, ViewingKey,
+    },
 };
 
 use common::MaybeSend;
 
 /// A railgun signer which can sign transactions and provide the associated 0xzk address.
+///
+/// The spending private key never crosses this interface: a hardware signer keeps it on the
+/// device and only answers [`Self::sign`]. The viewing key does cross it — note scanning is an
+/// ECDH per encrypted note, unworkable over a device round-trip — which is the usual split for
+/// privacy protocols: hardware protects spending, view keys are exportable.
+///
+/// `sign` is async and fallible: on a hardware signer it is a transport round-trip plus a user
+/// confirmation, either of which can fail or be declined.
+#[cfg_attr(native, async_trait::async_trait)]
+#[cfg_attr(wasm, async_trait::async_trait(?Send))]
 pub trait RailgunSigner: MaybeSend {
     fn chain_id(&self) -> ChainId;
     fn viewing_key(&self) -> ViewingKey;
-    fn spending_key(&self) -> SpendingKey;
-    fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError>;
+    fn spending_public_key(&self) -> SpendingPublicKey;
+    async fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError>;
+
+    /// A signer that knows the master public key but not the spending public key (a view-only
+    /// signer built from a 0zk address, which carries the former only) overrides this.
+    fn master_public_key(&self) -> MasterPublicKey {
+        MasterPublicKey::new(self.spending_public_key(), self.viewing_key().nullifying_key())
+    }
 
     fn address(&self) -> RailgunAddress {
-        RailgunAddress::from_private_keys(self.spending_key(), self.viewing_key(), self.chain_id())
+        RailgunAddress::from_public_keys(
+            self.master_public_key(),
+            self.viewing_key().public_key(),
+            self.chain_id(),
+        )
     }
 }
 
@@ -32,6 +54,12 @@ pub struct PrivateKeySigner {
 #[derive(Debug, Error)]
 #[error("Signing error: {0}")]
 pub struct RailgunSignerError(#[source] Box<dyn std::error::Error + Send + Sync>);
+
+impl RailgunSignerError {
+    pub fn new(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self(source.into())
+    }
+}
 
 impl PrivateKeySigner {
     pub fn new(spending_key: SpendingKey, viewing_key: ViewingKey, chain_id: ChainId) -> Arc<Self> {
@@ -48,20 +76,22 @@ impl PrivateKeySigner {
     }
 }
 
+#[cfg_attr(native, async_trait::async_trait)]
+#[cfg_attr(wasm, async_trait::async_trait(?Send))]
 impl RailgunSigner for PrivateKeySigner {
     fn chain_id(&self) -> ChainId {
         self.chain_id
     }
 
-    fn spending_key(&self) -> SpendingKey {
-        self.spending_key
+    fn spending_public_key(&self) -> SpendingPublicKey {
+        self.spending_key.public_key()
     }
 
     fn viewing_key(&self) -> ViewingKey {
         self.viewing_key
     }
 
-    fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError> {
+    async fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError> {
         Ok(self.spending_key.sign(inputs))
     }
 }

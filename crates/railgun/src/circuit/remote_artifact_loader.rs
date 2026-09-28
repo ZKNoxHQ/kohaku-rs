@@ -67,8 +67,11 @@ pub enum RemoteArtifactLoaderError {
 
 impl Default for RemoteArtifactLoader {
     fn default() -> Self {
+        // raw.githubusercontent.com serves the files directly with
+        // `access-control-allow-origin: *`. The github.com/.../raw/ form
+        // 301-redirects with no CORS header, which fails browser (wasm) fetches.
         Self::new(
-            "https://github.com/Robert-MacWha/privacy-protocol-artifacts/raw/refs/heads/main/artifacts/",
+            "https://raw.githubusercontent.com/Robert-MacWha/privacy-protocol-artifacts/main/artifacts/",
         )
     }
 }
