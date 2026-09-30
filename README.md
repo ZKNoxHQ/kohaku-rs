@@ -20,6 +20,10 @@ Kohaku-rs is a collection of rust crates for working with Ethereum privacy proto
 
 - [`kohaku-tornadocash`](./crates/tornadocash/) - [tornadocash](https://tornadocash.eth.limo/) client library.
 - [`kohaku-tornadocash-circuit`](./crates/tornadocash-circuit/) - Tornadocash circuit artifacts & proving wrapper.
+- [`kohaku-railgun`](./crates/railgun/) - [Railgun](https://railgun.org/) shielded pool client library.
+- [`kohaku-crypto`](./crates/crypto/) - Shared crypto primitives (Poseidon, BabyJubJub, merkle helpers).
+- [`kohaku-eip-1193`](./crates/eip-1193/) - EIP-1193-style provider abstraction for Alloy / JS.
+- [`poseidon-rust`](./crates/poseidon-rust/) - Circom-compatible Poseidon hash (vendored).
 - [`kohaku-userop-kit`](./crates/userop-kit/) - 4337 user operation builder, signer, and paymaster library.
 - [`kohaku-kv-store`](./crates/kv-store/) - Key-value store implementation for kohaku-rs. Used by other kohaku-rs crates for data persistence.
 - [`kohaku-merkle-tree`](./crates/merkle-tree/) - Merkle tree implementation backed by `kohaku-kv-store`.
