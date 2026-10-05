@@ -26,6 +26,12 @@ impl PirTransport {
         Self { router }
     }
 
+    /// Underlying hybrid router (classify / plan).
+    #[must_use]
+    pub fn router(&self) -> &PirRouter {
+        &self.router
+    }
+
     async fn handle(self, req: RequestPacket) -> Result<ResponsePacket, TransportError> {
         match req {
             RequestPacket::Single(req) => {
