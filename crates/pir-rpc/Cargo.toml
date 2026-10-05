@@ -1,5 +1,5 @@
 [package]
-name = "kohaku-pir-provider"
+name = "kohaku-pir-rpc"
 version = "0.1.0"
 edition = "2024"
 description = "Hybrid Ethereum JSON-RPC provider: PIR for private account reads, fallback RPC for the rest"

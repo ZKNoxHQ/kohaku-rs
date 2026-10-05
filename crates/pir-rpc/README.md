@@ -1,4 +1,4 @@
-# kohaku-pir-provider
+# kohaku-pir-rpc
 
 Dual-endpoint Ethereum JSON-RPC provider. A small allowlist of
 methods is answered via a [`LookupBackend`] (private PIR lookup). Everything
@@ -16,7 +16,7 @@ in the binary that talks to a remote PIR HTTP API:
 
 ```rust,ignore
 use std::sync::{Arc, Mutex};
-use kohaku_pir_provider::{LookupBackend, PirConnect, PirProviderError, PirRouter};
+use kohaku_pir_rpc::{LookupBackend, PirConnect, PirProviderError, PirRouter};
 use pir_client::PirClient;
 
 struct PirLookup(Mutex<PirClient>);

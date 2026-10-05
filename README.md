@@ -24,13 +24,15 @@ Kohaku-rs is a collection of rust crates for working with Ethereum privacy proto
 - [`kohaku-kv-store`](./crates/kv-store/) - Key-value store implementation for kohaku-rs. Used by other kohaku-rs crates for data persistence.
 - [`kohaku-merkle-tree`](./crates/merkle-tree/) - Merkle tree implementation backed by `kohaku-kv-store`.
 - [`kohaku-fork-kit`](./crates/fork-kit/) - Forking kit for testing and development of kohaku-rs crates.
-- [`kohaku-pir-provider`](./crates/pir-provider/) - dual-endpoint Ethereum provider: PIR for private account reads, fallback JSON-RPC for everything else.
+- [`kohaku-pir-rpc`](./crates/pir-rpc/) - dual-endpoint Ethereum provider: PIR for private account reads, fallback JSON-RPC for everything else.
+- [`kohaku-tor-rpc`](./crates/tor-rpc/) - Alloy JSON-RPC over Arti with shared or session-isolated circuits.
+- [`kohaku-privacy-rpc`](./crates/privacy-rpc/) - batch-aware Tor + PIR privacy orchestrator for Alloy JSON-RPC.
 
 ### Experiments
 
 Experiments are incomplete and unstable features that are not ready for production use. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for more information.
 
-- [`kohaku-pir-provider`](https://github.com/ethereum/kohaku-rs/tree/experiments/pir-v1/crates/pir-provider) - dual-endpoint Ethereum provider: PIR for private account reads, fallback JSON-RPC for everything else.
+- [`kohaku-pir-rpc`](https://github.com/ethereum/kohaku-rs/tree/experiments/pir-v1/crates/pir-rpc) - dual-endpoint Ethereum provider: PIR for private account reads, fallback JSON-RPC for everything else.
 
 ## Development
 

@@ -4,8 +4,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use crate::{
-    DatasetManifest, FallbackRpc, LookupBackend, MapFallback, MapLookup, PirProviderError, Route,
-    RouteTable,
+    DatasetManifest, FallbackRpc, LookupBackend, MapFallback, MapLookup, PirDecode, PirOp,
+    PirProviderError, PlannedOp, Route, RouteTable,
     routes::{encode_bytes, encode_qty, encode_uint256, encode_zero, parse_address_param},
 };
 
@@ -63,6 +63,74 @@ impl PirRouter {
         &self.routes
     }
 
+    /// Classify one JSON-RPC method into a PIR op or fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PirProviderError::InvalidParams`] when a PIR-routed method has
+    /// a malformed address / key.
+    pub fn plan_request(&self, method: &str, params: &Value) -> Result<PlannedOp, PirProviderError> {
+        let params = normalize_params(params);
+        match self.routes.classify(method, &params) {
+            Route::AccountBalance => {
+                let key = parse_address_param(&params)?.to_vec();
+                Ok(PlannedOp::Pir(PirOp {
+                    key,
+                    decode: PirDecode::AccountBalance,
+                }))
+            }
+            Route::AccountNonce => {
+                let key = parse_address_param(&params)?.to_vec();
+                Ok(PlannedOp::Pir(PirOp {
+                    key,
+                    decode: PirDecode::AccountNonce,
+                }))
+            }
+            Route::Call(m) => Ok(PlannedOp::Pir(PirOp {
+                key: m.key,
+                decode: PirDecode::Call {
+                    value_encoding: m.value_encoding,
+                },
+            })),
+            Route::Fallback => Ok(PlannedOp::Fallback),
+        }
+    }
+
+    /// Classify many requests (same order as input).
+    pub fn plan_requests<S: AsRef<str>>(
+        &self,
+        items: &[(S, Value)],
+    ) -> Vec<Result<PlannedOp, PirProviderError>> {
+        items
+            .iter()
+            .map(|(method, params)| self.plan_request(method.as_ref(), params))
+            .collect()
+    }
+
+    /// Execute PIR ops via one [`LookupBackend::lookup_batch`], then decode.
+    ///
+    /// A PIR miss is **not** an error: account methods return `0x0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the batch lookup worker fails. Per-item decode failures are
+    /// returned inside the `Vec`.
+    pub async fn execute_pir(
+        &self,
+        ops: &[PirOp],
+    ) -> Result<Vec<Result<Value, PirProviderError>>, PirProviderError> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys: Vec<Vec<u8>> = ops.iter().map(|op| op.key.clone()).collect();
+        let values = self.lookup_batch_blocking(keys).await?;
+        Ok(ops
+            .iter()
+            .zip(values)
+            .map(|(op, raw)| decode_pir(op, raw))
+            .collect())
+    }
+
     /// Dispatch one JSON-RPC method.
     ///
     /// # Errors
@@ -71,66 +139,64 @@ impl PirRouter {
     /// RPC/HTTP errors. A PIR miss is **not** an error: account methods return
     /// `0x0`.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, PirProviderError> {
-        let params = if params.is_null() {
-            Value::Array(Vec::new())
-        } else {
-            params
-        };
-        match self.routes.classify(method, &params) {
-            Route::AccountBalance => self.account_field(&params, AccountField::Balance).await,
-            Route::AccountNonce => self.account_field(&params, AccountField::Nonce).await,
-            Route::Call(m) => self.dataset_lookup(m.key, &m.value_encoding).await,
-            Route::Fallback => {
+        let params = normalize_params(&params);
+        match self.plan_request(method, &params)? {
+            PlannedOp::Pir(op) => {
+                let mut out = self.execute_pir(std::slice::from_ref(&op)).await?;
+                out.pop().unwrap_or_else(|| Ok(encode_qty(0)))
+            }
+            PlannedOp::Fallback => {
                 debug!(method, "fallback RPC");
                 self.fallback.request(method, params).await
             }
         }
     }
 
-    async fn account_field(
+    async fn lookup_batch_blocking(
         &self,
-        params: &Value,
-        field: AccountField,
-    ) -> Result<Value, PirProviderError> {
-        let key = parse_address_param(params)?;
-        let value = self.lookup_blocking(key.to_vec()).await?;
-        match value {
-            Some(raw) => {
-                let acct = parse_account_bytes(&raw).ok_or_else(|| {
-                    PirProviderError::Client("account value is not 40 bytes".into())
-                })?;
-                Ok(match field {
-                    AccountField::Balance => encode_qty(acct.balance),
-                    AccountField::Nonce => encode_qty(u128::from(acct.nonce)),
-                })
-            }
-            None => Ok(encode_qty(0)),
-        }
-    }
-
-    async fn dataset_lookup(
-        &self,
-        key: Vec<u8>,
-        encoding: &str,
-    ) -> Result<Value, PirProviderError> {
-        match self.lookup_blocking(key).await? {
-            Some(raw) => Ok(match encoding {
-                "bytes" | "account" => encode_bytes(&raw),
-                _ => encode_uint256(&raw),
-            }),
-            None => Ok(encode_zero(encoding)),
-        }
-    }
-
-    async fn lookup_blocking(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, PirProviderError> {
+        keys: Vec<Vec<u8>>,
+    ) -> Result<Vec<Option<Vec<u8>>>, PirProviderError> {
         let lookup = Arc::clone(&self.lookup);
-        tokio::task::spawn_blocking(move || lookup.lookup(&key)).await?
+        tokio::task::spawn_blocking(move || lookup.lookup_batch(&keys)).await?
     }
 }
 
-enum AccountField {
-    Balance,
-    Nonce,
+fn normalize_params(params: &Value) -> Value {
+    if params.is_null() {
+        Value::Array(Vec::new())
+    } else {
+        params.clone()
+    }
+}
+
+/// Decode raw PIR bytes for one planned op into a JSON-RPC result value.
+///
+/// A miss (`None`) yields the zero encoding for that op (never an error).
+///
+/// # Errors
+///
+/// Returns [`PirProviderError::Client`] when account blobs are the wrong size.
+pub fn decode_pir(op: &PirOp, value: Option<Vec<u8>>) -> Result<Value, PirProviderError> {
+    match (&op.decode, value) {
+        (PirDecode::AccountBalance, Some(raw)) => {
+            let acct = parse_account_bytes(&raw).ok_or_else(|| {
+                PirProviderError::Client("account value is not 40 bytes".into())
+            })?;
+            Ok(encode_qty(acct.balance))
+        }
+        (PirDecode::AccountNonce, Some(raw)) => {
+            let acct = parse_account_bytes(&raw).ok_or_else(|| {
+                PirProviderError::Client("account value is not 40 bytes".into())
+            })?;
+            Ok(encode_qty(u128::from(acct.nonce)))
+        }
+        (PirDecode::AccountBalance | PirDecode::AccountNonce, None) => Ok(encode_qty(0)),
+        (PirDecode::Call { value_encoding }, Some(raw)) => Ok(match value_encoding.as_str() {
+            "bytes" | "account" => encode_bytes(&raw),
+            _ => encode_uint256(&raw),
+        }),
+        (PirDecode::Call { value_encoding }, None) => Ok(encode_zero(value_encoding)),
+    }
 }
 
 fn parse_account_bytes(v: &[u8]) -> Option<AccountView> {
@@ -275,5 +341,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, json!("0xabc"));
+    }
+
+    #[tokio::test]
+    async fn execute_pir_batches_lookups() {
+        let lookup = MapLookup::default();
+        lookup.insert(addr(1), account_bytes(10, 1));
+        lookup.insert(addr(2), account_bytes(20, 2));
+        let router = PirRouter::mock(lookup, MapFallback::default(), Vec::new());
+        let ops = vec![
+            PirOp {
+                key: addr(1).to_vec(),
+                decode: PirDecode::AccountBalance,
+            },
+            PirOp {
+                key: addr(2).to_vec(),
+                decode: PirDecode::AccountNonce,
+            },
+        ];
+        let out = router.execute_pir(&ops).await.unwrap();
+        assert_eq!(out[0].as_ref().unwrap(), &json!("0xa"));
+        assert_eq!(out[1].as_ref().unwrap(), &json!("0x2"));
+    }
+
+    #[test]
+    fn plan_request_splits_pir_and_fallback() {
+        let router = PirRouter::mock(MapLookup::default(), MapFallback::default(), Vec::new());
+        match router
+            .plan_request("eth_getBalance", &json!([addr_hex(1), "latest"]))
+            .unwrap()
+        {
+            PlannedOp::Pir(op) => assert_eq!(op.key, addr(1)),
+            PlannedOp::Fallback => panic!("expected PIR"),
+        }
+        assert!(matches!(
+            router.plan_request("eth_getLogs", &json!([{}])).unwrap(),
+            PlannedOp::Fallback
+        ));
     }
 }

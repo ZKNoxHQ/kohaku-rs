@@ -3,7 +3,9 @@ members = [
     "fork-kit",
     "kv-store",
     "merkle-tree",
-    "pir-provider",
+    "pir-rpc",
+    "privacy-rpc",
+    "tor-rpc",
     "tornadocash",
     "tornadocash-circuit",
     "userop-kit",
@@ -33,7 +35,9 @@ insta = "1.48.0"
 kohaku-fork-kit = { path = "fork-kit" }
 kohaku-kv-store = { path = "kv-store" }
 kohaku-merkle-tree = { path = "merkle-tree" }
-kohaku-pir-provider = { path = "pir-provider" }
+kohaku-pir-rpc = { path = "pir-rpc" }
+kohaku-privacy-rpc = { path = "privacy-rpc" }
+kohaku-tor-rpc = { path = "tor-rpc" }
 kohaku-tornadocash = { path = "tornadocash" }
 kohaku-tornadocash-circuit = { path = "tornadocash-circuit" }
 kohaku-userop-kit = { path = "userop-kit" }

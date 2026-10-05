@@ -1,0 +1,22 @@
+[package]
+name = "kohaku-tor-rpc"
+version = "0.1.0"
+edition = "2024"
+description = "Alloy JSON-RPC over Arti with shared or session-isolated circuits"
+
+[dependencies]
+alloy = { workspace = true, features = ["providers", "json-rpc"] }
+anyhow = { workspace = true }
+arti-client = { version = "0.32", default-features = false, features = ["tokio", "rustls", "compression"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread"] }
+tokio-rustls = "0.26"
+tokio-util = { version = "0.7", features = ["compat"] }
+tor-rtcompat = { version = "0.32", features = ["tokio", "rustls"] }
+tower = { version = "0.5", features = ["util"] }
+url = "2"
+webpki-roots = "0.26"
+
+[lints]
+workspace = true
