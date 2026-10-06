@@ -875,22 +875,38 @@ impl PoolProvider {
             create2_state = CREATE2_MEASURE_STATE;
         }
         let salt = frame_account_salt(owner.address());
-        let account = predict_frame_account(factory, owner.address(), creation_code);
+        let local = predict_frame_account(factory, owner.address(), creation_code);
         let rpc_account = FrameAccountFactory::new(factory, rpc)
             .getAddress(owner.address(), salt)
             .call()
             .await
             .map_err(|e| ProviderError::Account(e.to_string()))?;
-        if rpc_account != account {
-            return Err(ProviderError::AccountMismatch {
-                local: account,
-                rpc: rpc_account,
-            });
-        }
         let code = rpc
-            .get_code_at(account)
+            .get_code_at(rpc_account)
             .await
             .map_err(|e| ProviderError::Account(e.to_string()))?;
+        let account = if rpc_account == local {
+            rpc_account
+        } else if !code.is_empty() {
+            let onchain_owner = FrameAccount::new(rpc_account, rpc)
+                .owner()
+                .call()
+                .await
+                .map_err(|e| ProviderError::Account(e.to_string()))?;
+            if onchain_owner != owner.address() {
+                return Err(ProviderError::Account(format!(
+                    "RPC account {rpc_account:#x} owner is {onchain_owner:#x}, expected {:#x}",
+                    owner.address()
+                )));
+            }
+            // Stale creation-code pin, but the account is already deployed under this owner.
+            rpc_account
+        } else {
+            return Err(ProviderError::AccountMismatch {
+                local,
+                rpc: rpc_account,
+            });
+        };
         let account_empty = code.is_empty();
         let nonce = if account_empty {
             0
