@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use kohaku_pir_rpc::{LookupBackend, PirProviderError};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{debug, info};
 use url::Url;
 
 use crate::TorRpcBackend;
@@ -96,10 +96,21 @@ impl AsyncLookupBackend for CachingAsyncLookup {
                 cached[idx] = Some(value);
             }
         } else {
+            // Includes cached PIR-absent (`None`) entries from an earlier pad.
             info!(hits, "PIR cache: all hits");
         }
 
-        Ok(cached.into_iter().map(|slot| slot.expect("filled")).collect())
+        let out: Vec<Option<Vec<u8>>> =
+            cached.into_iter().map(|slot| slot.expect("filled")).collect();
+        let pir_absent = out.iter().filter(|v| v.is_none()).count();
+        if pir_absent > 0 {
+            debug!(
+                pir_absent,
+                total = out.len(),
+                "PIR values absent in this batch (will encode as zero)"
+            );
+        }
+        Ok(out)
     }
 }
 

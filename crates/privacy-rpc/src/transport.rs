@@ -21,7 +21,7 @@ use kohaku_pir_rpc::{
 };
 use serde_json::{Value, value::RawValue};
 use tower::Service;
-use tracing::debug;
+use tracing::{debug, info};
 use url::Url;
 
 use crate::{
@@ -269,11 +269,32 @@ impl PrivacyTransport {
         }
 
         // Only emit responses for client jobs (first `jobs.len()` entries of all_ops).
+        // PIR `None` is proven non-membership → decode as zero (never silent RPC fallback).
+        let present = raw_by_all.iter().filter(|v| v.is_some()).count();
+        let absent = raw_by_all.len() - present;
+        if !all_ops.is_empty() {
+            info!(
+                present,
+                absent,
+                client_jobs = jobs.len(),
+                pad = pad_ops.len(),
+                "PIR lookup results (absent → zero encoding)"
+            );
+        }
+
         let mut out = Vec::with_capacity(jobs.len());
         for (job_i, (idx, id, op)) in jobs.iter().enumerate() {
+            let raw = raw_by_all[job_i].clone();
+            if raw.is_none() {
+                debug!(
+                    lane = ?op.lane,
+                    decode = ?op.decode,
+                    "PIR miss decoded as zero"
+                );
+            }
             out.push((
                 *idx,
-                match decode_pir(op, raw_by_all[job_i].clone()) {
+                match decode_pir(op, raw) {
                     Ok(value) => success_response(id.clone(), &value)?,
                     Err(e) => failure_response(id.clone(), &e),
                 },
