@@ -65,11 +65,7 @@ impl Indexer {
 
     pub async fn sync(&self) -> Result<(), IndexerError> {
         let latest = self.syncer.latest_block(&self.pool).await?;
-        self.sync_to(latest).await?;
-        self.verifier
-            .verify(&self.pool, self.tree().root().await?)
-            .await?;
-        Ok(())
+        self.sync_to(latest).await
     }
 
     async fn sync_to(&self, to_block: u64) -> Result<(), IndexerError> {
@@ -79,6 +75,9 @@ impl Indexer {
             .max(self.pool.deployed_block);
         if from >= to_block {
             info!("already synced to {latest}");
+            self.verifier
+                .verify(&self.pool, self.tree().root().await?)
+                .await?;
             return Ok(());
         }
         let events = self.syncer.sync(&self.pool, from..to_block).await?;
@@ -101,6 +100,11 @@ impl Indexer {
                 SyncEvent::NoteSpent { .. } | SyncEvent::RootPublished { .. } => {}
             }
         }
+        // Verify before committing height so a bad sync cannot stick the wallet
+        // past a recoverable reorg window.
+        self.verifier
+            .verify(&self.pool, tree.root().await?)
+            .await?;
         self.store.commit(to_block, epoch).await;
         Ok(())
     }

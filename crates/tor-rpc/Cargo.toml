@@ -2,7 +2,7 @@
 name = "kohaku-tor-rpc"
 version = "0.1.0"
 edition = "2024"
-description = "Alloy JSON-RPC over Arti, with a fresh Tor circuit per request"
+description = "Alloy JSON-RPC over Arti with shared or session-isolated circuits"
 
 [dependencies]
 alloy = { workspace = true, features = ["providers", "json-rpc"] }
@@ -17,3 +17,6 @@ tor-rtcompat = { version = "0.32", features = ["tokio", "rustls"] }
 tower = { version = "0.5", features = ["util"] }
 url = "2"
 webpki-roots = "0.26"
+
+[lints]
+workspace = true

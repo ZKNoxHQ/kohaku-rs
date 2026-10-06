@@ -27,7 +27,7 @@ impl<P: Provider> RpcSyncer<P> {
         Self {
             provider,
             batch_size: logs_block_range(),
-            batch_delay: Duration::from_millis(200),
+            batch_delay: logs_batch_delay(),
             progress: None,
         }
     }
@@ -116,7 +116,8 @@ impl<P: Provider> RpcSyncer<P> {
 }
 
 fn logs_block_range() -> u64 {
-    const DEFAULT: u64 = 256;
+    // Sparse pools finish faster with a wide range; override with RPC_LOGS_BLOCKRANGE.
+    const DEFAULT: u64 = 50_000;
     match std::env::var("RPC_LOGS_BLOCKRANGE") {
         Ok(raw) => match raw.parse::<u64>() {
             Ok(n) if n > 0 => n,
@@ -126,6 +127,18 @@ fn logs_block_range() -> u64 {
             }
         },
         Err(_) => DEFAULT,
+    }
+}
+
+fn logs_batch_delay() -> Duration {
+    match std::env::var("RPC_LOGS_BATCH_DELAY_MS") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(0) => Duration::from_millis(0),
+            Ok(n) => Duration::from_millis(n),
+            _ => Duration::from_millis(0),
+        },
+        // Hegota's pool is sparse; the old 200ms pause dominated first sync.
+        Err(_) => Duration::from_millis(0),
     }
 }
 

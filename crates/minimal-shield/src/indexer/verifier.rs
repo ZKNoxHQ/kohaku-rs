@@ -16,7 +16,9 @@ pub struct Verifier(Arc<dyn VerifierBackend>);
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum VerifierError {
-    #[error("invalid root {root}")]
+    #[error(
+        "invalid root {root}; pool state does not match the local tree. Delete pool-sync-*.bin and the wallet's indexer-*.redb, then sync again"
+    )]
     InvalidRoot { root: U256 },
     #[error(transparent)]
     Other(Box<dyn std::error::Error + Send + Sync>),

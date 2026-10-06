@@ -2,3 +2,5 @@
 .direnv
 crates/minimal-shield/.hegota-data/
 .DS_Store
+/target/
+/.hegota-target/

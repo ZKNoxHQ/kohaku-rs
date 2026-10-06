@@ -437,6 +437,7 @@ async fn cmd_unshield_with_tail(args: &mut impl Iterator<Item = String>) -> Resu
             parts.chain,
             parts.tip,
             parts.max_fee,
+            &parts.creation_code,
         )
         .await?;
     let account = result
@@ -518,6 +519,7 @@ async fn cmd_unshield_for_gas(args: &mut impl Iterator<Item = String>) -> Result
             parts.chain,
             parts.tip,
             parts.max_fee,
+            &parts.creation_code,
         )
         .await?;
     let account = result
@@ -547,6 +549,7 @@ struct SpendParts<P> {
     multicall3: Address,
     create2_exec: u64,
     create2_state: u64,
+    creation_code: Vec<u8>,
 }
 
 async fn prepare_spend() -> Result<SpendParts<impl Provider + Clone + 'static>> {
@@ -600,7 +603,15 @@ async fn prepare_spend() -> Result<SpendParts<impl Provider + Clone + 'static>> 
         multicall3,
         create2_exec: st.create2_exec.unwrap_or(0),
         create2_state: st.create2_state.unwrap_or(0),
+        creation_code: frame_account_creation_code()?,
     })
+}
+
+fn frame_account_creation_code() -> Result<Vec<u8>> {
+    let raw = std::env::var("HEGOTA_FRAME_ACCOUNT_CREATION_CODE")
+        .context("set HEGOTA_FRAME_ACCOUNT_CREATION_CODE to the FrameAccount creation bytecode hex")?;
+    let hex = raw.trim().trim_start_matches("0x");
+    hex::decode(hex).context("HEGOTA_FRAME_ACCOUNT_CREATION_CODE hex")
 }
 
 async fn broadcast_unshield(result: &UnshieldResult, note: &Note) -> Result<B256> {

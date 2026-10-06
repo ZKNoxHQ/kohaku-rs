@@ -50,12 +50,13 @@ pub const CREATE2_EXEC_FALLBACK: u64 = 1_500_000;
 pub const CREATE2_STATE_FALLBACK: u64 = 4_000_000;
 /// First successful Multicall tail: prefer these floors over a tight estimate.
 pub const TAIL_FIRST_DEPLOY_EXEC_FLOOR: u64 = 2_000_000;
-pub const TAIL_FIRST_DEPLOY_STATE_FLOOR: u64 = 5_000_000;
+pub const TAIL_FIRST_DEPLOY_STATE_FLOOR: u64 = 4_500_000;
 /// Generous SENDER pins for a direct `createAccount` frame.
 /// Hegotá charges code deposit as state (~1,530/byte). FrameAccount runtime is
 /// ~2 KiB, so 3M state halts the deploy with execution gas left over.
 pub const CREATE2_MEASURE_EXEC: u64 = 2_000_000;
-pub const CREATE2_MEASURE_STATE: u64 = 8_000_000;
+/// Measured deploy used ~4.18M state; keep headroom without a 10M reserve.
+pub const CREATE2_MEASURE_STATE: u64 = 5_500_000;
 /// Extra tail budget for `ecrecover`, the nonce write, and one value call.
 pub const EXECUTE_BATCH_PAD_EXEC: u64 = 100_000;
 pub const EXECUTE_BATCH_PAD_STATE: u64 = 100_000;

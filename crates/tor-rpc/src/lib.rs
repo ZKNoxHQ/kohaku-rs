@@ -6,6 +6,7 @@
 //!   [`TorClient::isolated_client`] for a short-lived session (all RPCs about one address).
 
 use std::{
+    fmt::Write as _,
     future::Future,
     io,
     sync::Arc,
@@ -28,6 +29,28 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tor_rtcompat::PreferredRuntime;
 use tower::Service;
 use url::Url;
+
+/// Raw HTTP response from a Tor exit request (shared client).
+#[derive(Clone, Debug)]
+pub struct TorHttpResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response header lines (name, value).
+    pub headers: Vec<(String, String)>,
+    /// Response body.
+    pub body: Vec<u8>,
+}
+
+impl TorHttpResponse {
+    /// First header value matching `name` (case-insensitive).
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
 
 /// A bootstrapped Tor client. Cloning is cheap and shares the directory state.
 #[derive(Clone)]
@@ -98,13 +121,102 @@ impl TorRpc {
     /// # Errors
     /// Returns when the download fails or the host is local.
     pub async fn get(&self, url: &Url) -> Result<Vec<u8>> {
-        let status = exchange(&self.client, url, "GET", &[], &[]).await?;
-        if !(200..300).contains(&status.code) {
-            bail!("GET {url} returned HTTP {}", status.code);
-        }
-        Ok(status.body)
+        self.request_shared(url, "GET", &[], &[]).await
     }
 
+    /// `POST url` with `body` over the shared Tor client.
+    ///
+    /// Used by PIR backends that must reach a PIR HTTP API without clearnet.
+    ///
+    /// # Errors
+    /// Returns when the upload fails or the host is local.
+    pub async fn post(
+        &self,
+        url: &Url,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.request_shared(url, "POST", headers, body).await
+    }
+
+    /// Arbitrary HTTP request over the shared Tor client.
+    ///
+    /// # Errors
+    /// Returns when the exchange fails, the host is local, or the status is not 2xx.
+    pub async fn request_shared(
+        &self,
+        url: &Url,
+        method: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<u8>> {
+        let resp = self.http_shared(url, method, headers, body).await?;
+        if !(200..300).contains(&resp.status) {
+            bail!("{method} {url} returned HTTP {}", resp.status);
+        }
+        Ok(resp.body)
+    }
+
+    /// HTTP over the shared Tor client, including response headers.
+    ///
+    /// # Errors
+    /// Returns when Tor or the HTTP exchange fails (not on non-2xx status).
+    pub async fn http_shared(
+        &self,
+        url: &Url,
+        method: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<TorHttpResponse> {
+        let status = exchange(&self.client, url, method, headers, body).await?;
+        Ok(TorHttpResponse {
+            status: status.code,
+            headers: status.headers,
+            body: status.body,
+        })
+    }
+
+    /// Send a JSON-RPC packet over the shared Tor client (one HTTP POST).
+    ///
+    /// # Errors
+    /// Returns a transport error when serialization, Tor, or HTTP fails.
+    pub async fn send_shared(
+        &self,
+        url: Url,
+        packet: RequestPacket,
+    ) -> Result<ResponsePacket, TransportError> {
+        reject_local(&url)
+            .map_err(|err| TransportErrorKind::custom(io::Error::other(err.to_string())))?;
+        TorTransport {
+            client: self.client.clone(),
+            url,
+        }
+        .post_packet(packet)
+        .await
+    }
+
+    /// Send a JSON-RPC packet on a fresh [`TorClient::isolated_client`].
+    ///
+    /// Batch all RPCs that should share one isolation token into `packet`.
+    ///
+    /// # Errors
+    /// Returns a transport error when serialization, Tor, or HTTP fails.
+    pub async fn send_isolated(
+        &self,
+        url: Url,
+        packet: RequestPacket,
+    ) -> Result<ResponsePacket, TransportError> {
+        reject_local(&url)
+            .map_err(|err| TransportErrorKind::custom(io::Error::other(err.to_string())))?;
+        TorTransport {
+            client: self.client.isolated_client(),
+            url,
+        }
+        .post_packet(packet)
+        .await
+    }
+
+    #[allow(clippy::unused_self)]
     fn rpc_client(&self, url: Url, client: TorClient<PreferredRuntime>) -> Result<RpcClient> {
         reject_local(&url)?;
         Ok(RpcClient::new(TorTransport { client, url }, false))
@@ -128,15 +240,15 @@ impl Service<RequestPacket> for TorTransport {
 
     fn call(&mut self, req: RequestPacket) -> Self::Future {
         let this = self.clone();
-        Box::pin(async move { this.post(req).await })
+        Box::pin(async move { this.post_packet(req).await })
     }
 }
 
 impl TorTransport {
-    async fn post(self, req: RequestPacket) -> Result<ResponsePacket, TransportError> {
+    async fn post_packet(self, req: RequestPacket) -> Result<ResponsePacket, TransportError> {
         let body = serde_json::to_vec(&req).map_err(TransportError::ser_err)?;
         let mut extra = vec![("content-type".to_string(), "application/json".to_string())];
-        for (name, value) in req.headers().iter() {
+        for (name, value) in &req.headers() {
             extra.push((
                 name.as_str().to_string(),
                 value.to_str().unwrap_or("").to_string(),
@@ -158,6 +270,7 @@ impl TorTransport {
 
 struct HttpStatus {
     code: u16,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -181,6 +294,7 @@ async fn exchange(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exchange_once(
     client: &TorClient<PreferredRuntime>,
     host: &str,
@@ -207,7 +321,7 @@ async fn exchange_once(
     let mut request =
         format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept: */*\r\n");
     if !body.is_empty() {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        let _ = write!(request, "Content-Length: {}\r\n", body.len());
     }
     for (name, value) in headers {
         request.push_str(name);
@@ -270,12 +384,16 @@ fn parse_http(raw: &[u8]) -> Result<HttpStatus> {
         .context("http status code")?;
     let mut length = None;
     let mut chunked = false;
+    let mut headers = Vec::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
+        let name = name.trim();
+        let value = value.trim();
+        headers.push((name.to_string(), value.to_string()));
         if name.eq_ignore_ascii_case("content-length") {
-            length = value.trim().parse().ok();
+            length = value.parse().ok();
         } else if name.eq_ignore_ascii_case("transfer-encoding")
             && value.to_ascii_lowercase().contains("chunked")
         {
@@ -290,7 +408,11 @@ fn parse_http(raw: &[u8]) -> Result<HttpStatus> {
     } else {
         rest.to_vec()
     };
-    Ok(HttpStatus { code, body })
+    Ok(HttpStatus {
+        code,
+        headers,
+        body,
+    })
 }
 
 fn decode_chunks(mut rest: &[u8]) -> Result<Vec<u8>> {
@@ -321,7 +443,7 @@ fn reject_local(url: &Url) -> Result<()> {
     let local = host.eq_ignore_ascii_case("localhost")
         || host == "127.0.0.1"
         || host == "::1"
-        || host.ends_with(".local")
+        || host.to_ascii_lowercase().ends_with(".local")
         || host.starts_with("10.")
         || host.starts_with("192.168.")
         || host.starts_with("172.16.")
@@ -400,7 +522,7 @@ mod tests {
         let started = std::time::Instant::now();
         let n = tor
             .with_isolated(url, |client| async move {
-                let p = RootProvider::new(client);
+                let p: RootProvider = RootProvider::new(client);
                 Ok(alloy::providers::Provider::get_block_number(&p).await?)
             })
             .await

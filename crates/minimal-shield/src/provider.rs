@@ -41,6 +41,10 @@ pub enum ProviderError {
     FeeExceedsValue { value: U256, fee: U256 },
     #[error("account lookup: {0}")]
     Account(String),
+    #[error("RPC getAddress {rpc:#x} != local CREATE2 {local:#x}; refusing to redirect withdrawal")]
+    AccountMismatch { local: Address, rpc: Address },
+    #[error("FrameAccount creation code is required to predict addresses offline")]
+    MissingCreationCode,
     #[error("DEFAULT tail target must be nonzero")]
     ZeroTailTarget,
     #[error("combining publishEpochRoot with another DEFAULT call needs Multicall3")]
@@ -99,6 +103,31 @@ pub fn frame_account_salt(owner: Address) -> B256 {
     buf[..10].copy_from_slice(b"FRAMEACCT1");
     buf[10..].copy_from_slice(owner.as_slice());
     keccak256(buf)
+}
+
+/// Offline CREATE2 address for a FrameAccount: `creation_code || abi.encode(owner)`.
+#[must_use]
+pub fn predict_frame_account(
+    factory: Address,
+    owner: Address,
+    creation_code: &[u8],
+) -> Address {
+    let salt = frame_account_salt(owner);
+    let mut init_code = Vec::with_capacity(creation_code.len() + 32);
+    init_code.extend_from_slice(creation_code);
+    init_code.extend_from_slice(&owner.abi_encode());
+    let init_hash = keccak256(&init_code);
+    let mut buf = Vec::with_capacity(1 + 20 + 32 + 32);
+    buf.push(0xff);
+    buf.extend_from_slice(factory.as_slice());
+    buf.extend_from_slice(salt.as_slice());
+    buf.extend_from_slice(init_hash.as_slice());
+    Address::from_slice(&keccak256(buf)[12..])
+}
+
+/// All-nonzero 288-byte placeholder matching the live proof wire size.
+fn placeholder_proof() -> Bytes {
+    Bytes::from(vec![0xffu8; 288])
 }
 
 impl PoolProvider {
@@ -235,6 +264,7 @@ impl PoolProvider {
         chain_id: u64,
         max_priority_fee: AlloyU256,
         max_fee: AlloyU256,
+        creation_code: &[u8],
     ) -> Result<UnshieldResult, ProviderError> {
         let (account, tail) = self
             .account_tail(
@@ -246,6 +276,7 @@ impl PoolProvider {
                 create2_state,
                 chain_id,
                 true,
+                creation_code,
             )
             .await?;
         let mut result = self
@@ -293,6 +324,7 @@ impl PoolProvider {
         chain_id: u64,
         max_priority_fee: AlloyU256,
         max_fee: AlloyU256,
+        creation_code: &[u8],
     ) -> Result<UnshieldResult, ProviderError> {
         let (account, tail) = self
             .account_tail(
@@ -304,6 +336,7 @@ impl PoolProvider {
                 create2_state,
                 chain_id,
                 false,
+                creation_code,
             )
             .await?;
         self.spend(
@@ -429,7 +462,7 @@ impl PoolProvider {
         keys.sort();
         let src = source_id(self.indexer.pool().address, epoch);
         let tuple = recent_root_tuple_bytes(src, root_slot, u256_to_b256(witness.root));
-        let dummy_proof = Bytes::from(vec![1u8; 256]);
+        let dummy_proof = placeholder_proof();
 
         if gas_only {
             witness.recipient = Address::ZERO;
@@ -472,13 +505,11 @@ impl PoolProvider {
             tx.sign_secp256k1(0, authorizer)?;
             tx.check_resource_limits()?;
             let cost = alloy_to_ruint(tx.max_cost());
-            // Dispatcher VERIFY reverts if fee < TXPARAM(0x06). Pad in case our
-            // max_cost underestimates the node's.
-            let padded = cost + cost / U256::from(4);
-            if chosen_fee >= padded {
+            // Price the real 288-byte proof placeholder; no extra 25% pad.
+            if chosen_fee >= cost {
                 break;
             }
-            chosen_fee = padded;
+            chosen_fee = cost;
         }
 
         if gas_only {
@@ -668,7 +699,7 @@ impl PoolProvider {
                 chain_id,
                 &keys,
                 &tuple,
-                Bytes::from(vec![1u8; 256]),
+                placeholder_proof(),
                 &spend_struct(
                     &witness,
                     root_slot,
@@ -688,11 +719,10 @@ impl PoolProvider {
             tx.sign_secp256k1(0, authorizer)?;
             tx.check_resource_limits()?;
             let cost = alloy_to_ruint(tx.max_cost());
-            let padded = cost + cost / U256::from(4);
-            if chosen_fee >= padded {
+            if chosen_fee >= cost {
                 break;
             }
-            chosen_fee = padded;
+            chosen_fee = cost;
         }
         if sweep {
             if sum <= chosen_fee {
@@ -790,7 +820,8 @@ impl PoolProvider {
     /// `executeBatch` because the pool, not the account, is the frame sender.
     ///
     /// # Errors
-    /// Returns when the factory is missing or the account cannot be read.
+    /// Returns when the factory is missing, creation code is missing, the RPC
+    /// disagrees with local CREATE2, or the account cannot be read.
     #[allow(clippy::too_many_arguments)]
     pub async fn prepare_account_tail<P: Provider + Sync>(
         &self,
@@ -802,6 +833,7 @@ impl PoolProvider {
         create2_state: u64,
         chain_id: u64,
         include_claim: bool,
+        creation_code: &[u8],
     ) -> Result<(Address, TailCall), ProviderError> {
         self.account_tail(
             rpc,
@@ -812,6 +844,7 @@ impl PoolProvider {
             create2_state,
             chain_id,
             include_claim,
+            creation_code,
         )
         .await
     }
@@ -826,10 +859,14 @@ impl PoolProvider {
         mut create2_state: u64,
         chain_id: u64,
         include_claim: bool,
+        creation_code: &[u8],
     ) -> Result<(Address, TailCall), ProviderError> {
         let factory = self.indexer.pool().factory;
         if factory.is_zero() {
             return Err(ProviderError::MissingFactory);
+        }
+        if creation_code.is_empty() {
+            return Err(ProviderError::MissingCreationCode);
         }
         if create2_exec == 0 {
             create2_exec = CREATE2_MEASURE_EXEC;
@@ -838,11 +875,18 @@ impl PoolProvider {
             create2_state = CREATE2_MEASURE_STATE;
         }
         let salt = frame_account_salt(owner.address());
-        let account = FrameAccountFactory::new(factory, rpc)
+        let account = predict_frame_account(factory, owner.address(), creation_code);
+        let rpc_account = FrameAccountFactory::new(factory, rpc)
             .getAddress(owner.address(), salt)
             .call()
             .await
             .map_err(|e| ProviderError::Account(e.to_string()))?;
+        if rpc_account != account {
+            return Err(ProviderError::AccountMismatch {
+                local: account,
+                rpc: rpc_account,
+            });
+        }
         let code = rpc
             .get_code_at(account)
             .await
@@ -1229,7 +1273,7 @@ fn alloy_to_ruint(v: AlloyU256) -> U256 {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_account_salt, Call, PoolProvider};
+    use super::{frame_account_salt, predict_frame_account, Call, PoolProvider};
     use alloy::primitives::{address, b256, Address, Bytes, B256, U256};
 
     #[test]
@@ -1246,6 +1290,20 @@ mod tests {
         assert_eq!(
             frame_account_salt(owner),
             B256::from(alloy::primitives::keccak256(packed))
+        );
+    }
+
+    #[test]
+    fn predict_frame_account_is_create2_of_init_code() {
+        let factory = address!("0x445f97b761c3f99f0e2f9e6f4adafcc98486f5fc");
+        let owner = address!("0x1111111111111111111111111111111111111111");
+        let creation = [0x60u8, 0x80, 0x60, 0x40];
+        let a = predict_frame_account(factory, owner, &creation);
+        let b = predict_frame_account(factory, owner, &creation);
+        assert_eq!(a, b);
+        assert_ne!(
+            a,
+            predict_frame_account(factory, Address::ZERO, &creation)
         );
     }
 

@@ -1,26 +1,28 @@
 use std::time::Duration;
 
-use alloy::primitives::{Address, B256, Bytes, U256};
+use alloy::{
+    primitives::{Address, B256, Bytes, U256},
+    rpc::client::RpcClient,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::tx::FrameTx;
 
-const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const RECEIPT_RETRIES: u32 = 3;
 
 #[derive(Clone, Debug)]
 pub struct FrameTxClient {
-    rpc: Url,
-    http: reqwest::Client,
+    client: RpcClient,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("rpc error: {0}")]
     Rpc(String),
-    #[error(transparent)]
-    Http(#[from] reqwest::Error),
+    #[error("transport: {0}")]
+    Transport(String),
     #[error("simulate unavailable on this endpoint")]
     SimulateUnavailable,
     #[error("invalid simulation: {0}")]
@@ -53,47 +55,28 @@ pub struct SimulateFrame {
     pub extra: serde_json::Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct RpcReq<'a> {
-    jsonrpc: &'a str,
-    id: u64,
-    method: &'a str,
-    params: Value,
-}
-
 impl FrameTxClient {
+    /// Clearnet HTTP client for the given RPC URL.
     #[must_use]
     pub fn new(rpc: Url) -> Self {
         Self {
-            rpc,
-            http: reqwest::Client::builder()
-                .timeout(RPC_TIMEOUT)
-                .build()
-                .expect("reqwest client"),
+            client: RpcClient::new_http(rpc),
         }
+    }
+
+    /// Wrap an existing Alloy RPC client (shared or Tor-isolated).
+    #[must_use]
+    pub fn from_rpc_client(client: RpcClient) -> Self {
+        Self { client }
     }
 
     /// # Errors
     /// Returns if the RPC call fails or the response is malformed.
     pub async fn rpc(&self, method: &str, params: Value) -> Result<Value, ClientError> {
-        let body = RpcReq {
-            jsonrpc: "2.0",
-            id: 1,
-            method,
-            params,
-        };
-        let resp: Value = self
-            .http
-            .post(self.rpc.clone())
-            .json(&body)
-            .send()
-            .await?
-            .json()
-            .await?;
-        if let Some(err) = resp.get("error") {
-            return Err(ClientError::Rpc(err.to_string()));
-        }
-        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+        self.client
+            .request(method.to_string(), params)
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))
     }
 
     /// # Errors
@@ -139,9 +122,22 @@ impl FrameTxClient {
         parse_hex_u64(&v).ok_or_else(|| ClientError::Rpc("bad nonce".into()))
     }
 
+    /// Tip and max fee from the latest base fee.
+    ///
     /// # Errors
     /// Returns if the RPC call fails.
     pub async fn fees(&self) -> Result<(U256, U256), ClientError> {
+        self.fees_capped(None).await
+    }
+
+    /// Like [`Self::fees`], but truncates max fee to `max_fee_cap` when set.
+    ///
+    /// # Errors
+    /// Returns if the RPC call fails.
+    pub async fn fees_capped(
+        &self,
+        max_fee_cap: Option<U256>,
+    ) -> Result<(U256, U256), ClientError> {
         let blk = self
             .rpc("eth_getBlockByNumber", json!(["latest", false]))
             .await?;
@@ -150,7 +146,11 @@ impl FrameTxClient {
             .and_then(parse_hex_u256)
             .unwrap_or(U256::ZERO);
         let tip = U256::from(1_000_000_000u64);
-        Ok((tip, base * U256::from(2) + tip))
+        let mut max_fee = base * U256::from(2) + tip;
+        if let Some(cap) = max_fee_cap {
+            max_fee = max_fee.min(cap);
+        }
+        Ok((tip, max_fee))
     }
 
     /// # Errors
@@ -183,18 +183,46 @@ impl FrameTxClient {
     }
 
     /// Poll `eth_getTransactionReceipt` until it is present.
+    /// Transient RPC errors are retried; only a timeout is definitive failure.
     ///
     /// # Errors
-    /// Returns if the RPC fails or the wait exceeds `attempts`.
+    /// Returns if the wait exceeds `attempts`.
     pub async fn wait_receipt(&self, hash: B256, attempts: u32) -> Result<Value, ClientError> {
+        let mut last_err: Option<ClientError> = None;
         for _ in 0..attempts {
-            let v = self
+            match self
                 .rpc("eth_getTransactionReceipt", json!([format!("{hash:#x}")]))
-                .await?;
-            if !v.is_null() {
-                return Ok(v);
+                .await
+            {
+                Ok(v) if !v.is_null() => return Ok(v),
+                Ok(_) => {
+                    last_err = None;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    for _ in 0..RECEIPT_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        match self
+                            .rpc("eth_getTransactionReceipt", json!([format!("{hash:#x}")]))
+                            .await
+                        {
+                            Ok(v) if !v.is_null() => return Ok(v),
+                            Ok(_) => {
+                                last_err = None;
+                                break;
+                            }
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if let Some(err) = last_err {
+            return Err(ClientError::Rpc(format!(
+                "timed out waiting for {hash:#x} (last error: {err})"
+            )));
         }
         Err(ClientError::Rpc(format!("timed out waiting for {hash:#x}")))
     }
@@ -211,30 +239,23 @@ impl FrameTxClient {
     /// # Errors
     /// Returns if the RPC fails for a reason other than a missing method.
     pub async fn simulate(&self, raw: &Bytes) -> Result<Option<SimulateResult>, ClientError> {
-        let body = RpcReq {
-            jsonrpc: "2.0",
-            id: 1,
-            method: "ethrex_simulateFrameTransaction",
-            params: json!([format!("0x{}", hex::encode(raw))]),
-        };
-        let resp: Value = self
-            .http
-            .post(self.rpc.clone())
-            .json(&body)
-            .send()
-            .await?
-            .json()
-            .await?;
-        if let Some(err) = resp.get("error") {
-            if err.get("code").and_then(Value::as_i64) == Some(-32601) {
-                return Ok(None);
+        match self
+            .rpc(
+                "ethrex_simulateFrameTransaction",
+                json!([format!("0x{}", hex::encode(raw))]),
+            )
+            .await
+        {
+            Ok(result) => Ok(Some(
+                serde_json::from_value(result).map_err(|e| ClientError::Rpc(e.to_string()))?,
+            )),
+            Err(ClientError::Transport(msg)) | Err(ClientError::Rpc(msg))
+                if msg.contains("-32601") || msg.to_ascii_lowercase().contains("method not found") =>
+            {
+                Ok(None)
             }
-            return Err(ClientError::Rpc(err.to_string()));
+            Err(err) => Err(err),
         }
-        let result = resp.get("result").cloned().unwrap_or(Value::Null);
-        Ok(Some(
-            serde_json::from_value(result).map_err(|e| ClientError::Rpc(e.to_string()))?,
-        ))
     }
 
     /// # Errors

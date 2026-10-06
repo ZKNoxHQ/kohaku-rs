@@ -12,6 +12,7 @@ alloy = { workspace = true, features = [
     "signer-local",
     "rpc",
     "rpc-types",
+    "providers",
 ] }
 anyhow = { workspace = true }
 hex = { workspace = true }
