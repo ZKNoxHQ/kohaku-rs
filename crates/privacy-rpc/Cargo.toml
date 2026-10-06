@@ -15,6 +15,7 @@ alloy = { workspace = true, features = [
     "network",
     "providers",
     "transports",
+    "sol-types",
 ] }
 async-trait = { workspace = true }
 futures = { workspace = true }

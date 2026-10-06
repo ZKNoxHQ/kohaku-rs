@@ -1,17 +1,22 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
 use tracing::debug;
 
 use crate::{
-    DatasetManifest, FallbackRpc, LookupBackend, MapFallback, MapLookup, PirDecode, PirOp,
+    DatasetManifest, FallbackRpc, LookupBackend, MapFallback, MapLookup, PirDecode, PirLane, PirOp,
     PirProviderError, PlannedOp, Route, RouteTable,
     routes::{encode_bytes, encode_qty, encode_uint256, encode_zero, parse_address_param},
+    tokens::parse_storage_value,
 };
 
 /// Hybrid router: PIR allowlist + JSON-RPC fallback.
 pub struct PirRouter {
+    /// Account-table PIR backend.
     lookup: Arc<dyn LookupBackend>,
+    /// Optional token-storage PIR backend.
+    tokens_lookup: Option<Arc<dyn LookupBackend>>,
     fallback: Arc<dyn FallbackRpc>,
     routes: RouteTable,
 }
@@ -30,8 +35,23 @@ impl PirRouter {
         rpc_url: &str,
         datasets: Vec<DatasetManifest>,
     ) -> Result<Self, PirProviderError> {
-        Ok(Self::from_parts(
-            lookup,
+        Self::with_rpc_dual(lookup, None, rpc_url, datasets)
+    }
+
+    /// Like [`with_rpc`](Self::with_rpc) with a separate token-storage PIR backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PirProviderError::InvalidUrl`] if `rpc_url` is not a valid HTTP URL.
+    pub fn with_rpc_dual(
+        accounts: Arc<dyn LookupBackend>,
+        tokens: Option<Arc<dyn LookupBackend>>,
+        rpc_url: &str,
+        datasets: Vec<DatasetManifest>,
+    ) -> Result<Self, PirProviderError> {
+        Ok(Self::from_parts_dual(
+            accounts,
+            tokens,
             Arc::new(crate::HttpFallback::new(rpc_url)?),
             datasets,
         ))
@@ -44,8 +64,20 @@ impl PirRouter {
         fallback: Arc<dyn FallbackRpc>,
         datasets: Vec<DatasetManifest>,
     ) -> Self {
+        Self::from_parts_dual(lookup, None, fallback, datasets)
+    }
+
+    /// Build a router with separate account and token PIR backends.
+    #[must_use]
+    pub fn from_parts_dual(
+        lookup: Arc<dyn LookupBackend>,
+        tokens_lookup: Option<Arc<dyn LookupBackend>>,
+        fallback: Arc<dyn FallbackRpc>,
+        datasets: Vec<DatasetManifest>,
+    ) -> Self {
         Self {
             lookup,
+            tokens_lookup,
             fallback,
             routes: RouteTable::from_datasets(datasets),
         }
@@ -75,22 +107,45 @@ impl PirRouter {
             Route::AccountBalance => {
                 let key = parse_address_param(&params)?.to_vec();
                 Ok(PlannedOp::Pir(PirOp {
+                    lane: PirLane::Account,
                     key,
                     decode: PirDecode::AccountBalance,
+                    holder: None,
+                    token_index: None,
                 }))
             }
             Route::AccountNonce => {
                 let key = parse_address_param(&params)?.to_vec();
                 Ok(PlannedOp::Pir(PirOp {
+                    lane: PirLane::Account,
                     key,
                     decode: PirDecode::AccountNonce,
+                    holder: None,
+                    token_index: None,
+                }))
+            }
+            Route::TokenBalance(m) => {
+                let token_index = crate::tokens::PIR_TOKENS
+                    .iter()
+                    .position(|t| t.symbol == m.token.symbol);
+                Ok(PlannedOp::Pir(PirOp {
+                    lane: PirLane::TokenStorage,
+                    key: m.key,
+                    decode: PirDecode::TokenBalance {
+                        flag_in_top_bit: m.token.flag_in_top_bit,
+                    },
+                    holder: Some(m.holder),
+                    token_index,
                 }))
             }
             Route::Call(m) => Ok(PlannedOp::Pir(PirOp {
+                lane: PirLane::Account,
                 key: m.key,
                 decode: PirDecode::Call {
                     value_encoding: m.value_encoding,
                 },
+                holder: None,
+                token_index: None,
             })),
             Route::Fallback => Ok(PlannedOp::Fallback),
         }
@@ -109,6 +164,8 @@ impl PirRouter {
 
     /// Execute PIR ops via one [`LookupBackend::lookup_batch`], then decode.
     ///
+    /// Duplicate `(lane, key)` pairs share a single physical lookup.
+    ///
     /// A PIR miss is **not** an error: account methods return `0x0`.
     ///
     /// # Errors
@@ -122,12 +179,51 @@ impl PirRouter {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let keys: Vec<Vec<u8>> = ops.iter().map(|op| op.key.clone()).collect();
-        let values = self.lookup_batch_blocking(keys).await?;
+
+        let mut account_ops = Vec::new();
+        let mut token_ops = Vec::new();
+        let mut account_idx = Vec::new();
+        let mut token_idx = Vec::new();
+        for (i, op) in ops.iter().enumerate() {
+            match op.lane {
+                PirLane::Account => {
+                    account_idx.push(i);
+                    account_ops.push(op.clone());
+                }
+                PirLane::TokenStorage => {
+                    token_idx.push(i);
+                    token_ops.push(op.clone());
+                }
+            }
+        }
+
+        let account_values = self
+            .lookup_lane_blocking(Arc::clone(&self.lookup), &account_ops)
+            .await?;
+        let token_values = if token_ops.is_empty() {
+            Vec::new()
+        } else {
+            let tokens = self.tokens_lookup.as_ref().ok_or_else(|| {
+                PirProviderError::Client(
+                    "token PIR ops planned but no tokens lookup configured".into(),
+                )
+            })?;
+            self.lookup_lane_blocking(Arc::clone(tokens), &token_ops)
+                .await?
+        };
+
+        let mut raw: Vec<Option<Vec<u8>>> = vec![None; ops.len()];
+        for (j, &i) in account_idx.iter().enumerate() {
+            raw[i] = account_values[j].clone();
+        }
+        for (j, &i) in token_idx.iter().enumerate() {
+            raw[i] = token_values[j].clone();
+        }
+
         Ok(ops
             .iter()
-            .zip(values)
-            .map(|(op, raw)| decode_pir(op, raw))
+            .enumerate()
+            .map(|(i, op)| decode_pir(op, raw[i].clone()))
             .collect())
     }
 
@@ -141,6 +237,12 @@ impl PirRouter {
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, PirProviderError> {
         let params = normalize_params(&params);
         match self.plan_request(method, &params)? {
+            PlannedOp::Pir(op)
+                if op.lane == PirLane::TokenStorage && self.tokens_lookup.is_none() =>
+            {
+                debug!(method, "token PIR unavailable; fallback RPC");
+                self.fallback.request(method, params).await
+            }
             PlannedOp::Pir(op) => {
                 let mut out = self.execute_pir(std::slice::from_ref(&op)).await?;
                 out.pop().unwrap_or_else(|| Ok(encode_qty(0)))
@@ -152,13 +254,39 @@ impl PirRouter {
         }
     }
 
-    async fn lookup_batch_blocking(
+    async fn lookup_lane_blocking(
         &self,
-        keys: Vec<Vec<u8>>,
+        lookup: Arc<dyn LookupBackend>,
+        ops: &[PirOp],
     ) -> Result<Vec<Option<Vec<u8>>>, PirProviderError> {
-        let lookup = Arc::clone(&self.lookup);
-        tokio::task::spawn_blocking(move || lookup.lookup_batch(&keys)).await?
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (unique_keys, remap) = dedupe_keys(ops);
+        let values =
+            tokio::task::spawn_blocking(move || lookup.lookup_batch(&unique_keys)).await??;
+        Ok(remap.into_iter().map(|i| values[i].clone()).collect())
     }
+}
+
+/// Deduplicate ops by `(lane, key)`. Returns unique keys (lookup order) and a
+/// remap from op index → unique key index.
+pub fn dedupe_keys(ops: &[PirOp]) -> (Vec<Vec<u8>>, Vec<usize>) {
+    let mut index_of: HashMap<(PirLane, Vec<u8>), usize> = HashMap::new();
+    let mut unique = Vec::new();
+    let mut remap = Vec::with_capacity(ops.len());
+    for op in ops {
+        let k = (op.lane, op.key.clone());
+        if let Some(&i) = index_of.get(&k) {
+            remap.push(i);
+        } else {
+            let i = unique.len();
+            index_of.insert(k, i);
+            unique.push(op.key.clone());
+            remap.push(i);
+        }
+    }
+    (unique, remap)
 }
 
 fn normalize_params(params: &Value) -> Value {
@@ -175,7 +303,7 @@ fn normalize_params(params: &Value) -> Value {
 ///
 /// # Errors
 ///
-/// Returns [`PirProviderError::Client`] when account blobs are the wrong size.
+/// Returns [`PirProviderError::Client`] when account/storage blobs are the wrong size.
 pub fn decode_pir(op: &PirOp, value: Option<Vec<u8>>) -> Result<Value, PirProviderError> {
     match (&op.decode, value) {
         (PirDecode::AccountBalance, Some(raw)) => {
@@ -190,7 +318,19 @@ pub fn decode_pir(op: &PirOp, value: Option<Vec<u8>>) -> Result<Value, PirProvid
             })?;
             Ok(encode_qty(u128::from(acct.nonce)))
         }
+        (PirDecode::AccountCode, Some(raw)) => Ok(encode_bytes(&raw)),
+        (PirDecode::AccountCode, None) => Ok(encode_bytes(&[])),
         (PirDecode::AccountBalance | PirDecode::AccountNonce, None) => Ok(encode_qty(0)),
+        (PirDecode::TokenBalance { flag_in_top_bit }, Some(raw)) => {
+            let mut word = parse_storage_value(&raw).ok_or_else(|| {
+                PirProviderError::Client("token value is not 40-byte storage cell".into())
+            })?;
+            if *flag_in_top_bit {
+                word[0] &= 0x7f;
+            }
+            Ok(encode_uint256(&word))
+        }
+        (PirDecode::TokenBalance { .. }, None) => Ok(encode_uint256(&[])),
         (PirDecode::Call { value_encoding }, Some(raw)) => Ok(match value_encoding.as_str() {
             "bytes" | "account" => encode_bytes(&raw),
             _ => encode_uint256(&raw),
@@ -217,6 +357,7 @@ struct AccountView {
 #[cfg(test)]
 mod tests {
     use crate::DatasetManifest;
+    use crate::tokens::{PIR_TOKENS, parse_storage_value};
     use serde_json::json;
 
     use super::*;
@@ -226,6 +367,12 @@ mod tests {
         let mut v = vec![0u8; 40];
         v[16..32].copy_from_slice(&balance.to_be_bytes());
         v[32..40].copy_from_slice(&nonce.to_be_bytes());
+        v
+    }
+
+    fn storage_cell(word: [u8; 32]) -> Vec<u8> {
+        let mut v = vec![0u8; 40];
+        v[8..].copy_from_slice(&word);
         v
     }
 
@@ -301,6 +448,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usdc_balance_of_uses_token_pir() {
+        let holder = addr(2);
+        let token = &PIR_TOKENS[0];
+        let key = token.balance_key(&holder);
+        let mut word = [0u8; 32];
+        word[0] = 0x80; // blacklist bit
+        word[31] = 42;
+        let tokens = Arc::new(MapLookup::default());
+        tokens.insert(key.as_slice(), storage_cell(word));
+        let fallback = MapFallback::default();
+        fallback.set("eth_call", json!("0xdead"));
+        let router = PirRouter::from_parts_dual(
+            Arc::new(MapLookup::default()),
+            Some(tokens),
+            Arc::new(fallback),
+            Vec::new(),
+        );
+
+        let data = crate::routes::balance_of_data_hex(&holder);
+        let params = json!([{ "to": token.address, "data": data }, "latest"]);
+        let got = router.request("eth_call", params).await.unwrap();
+        let mut cleared = word;
+        cleared[0] = 0;
+        assert_eq!(got, encode_uint256(&cleared));
+        assert_eq!(parse_storage_value(&storage_cell(word)).unwrap()[31], 42);
+    }
+
+    #[tokio::test]
     async fn matched_eth_call_uses_pir() {
         let to = addr(8);
         let holder = addr(2);
@@ -344,6 +519,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_pir_dedupes_same_account_key() {
+        let lookup = MapLookup::default();
+        lookup.insert(addr(1), account_bytes(10, 3));
+        let router = PirRouter::mock(lookup, MapFallback::default(), Vec::new());
+        let ops = vec![
+            PirOp {
+                lane: PirLane::Account,
+                key: addr(1).to_vec(),
+                decode: PirDecode::AccountBalance,
+                holder: None,
+                token_index: None,
+            },
+            PirOp {
+                lane: PirLane::Account,
+                key: addr(1).to_vec(),
+                decode: PirDecode::AccountNonce,
+                holder: None,
+                token_index: None,
+            },
+        ];
+        let out = router.execute_pir(&ops).await.unwrap();
+        assert_eq!(out[0].as_ref().unwrap(), &json!("0xa"));
+        assert_eq!(out[1].as_ref().unwrap(), &json!("0x3"));
+    }
+
+    #[tokio::test]
     async fn execute_pir_batches_lookups() {
         let lookup = MapLookup::default();
         lookup.insert(addr(1), account_bytes(10, 1));
@@ -351,12 +552,18 @@ mod tests {
         let router = PirRouter::mock(lookup, MapFallback::default(), Vec::new());
         let ops = vec![
             PirOp {
+                lane: PirLane::Account,
                 key: addr(1).to_vec(),
                 decode: PirDecode::AccountBalance,
+                holder: None,
+                token_index: None,
             },
             PirOp {
+                lane: PirLane::Account,
                 key: addr(2).to_vec(),
                 decode: PirDecode::AccountNonce,
+                holder: None,
+                token_index: None,
             },
         ];
         let out = router.execute_pir(&ops).await.unwrap();
@@ -371,11 +578,20 @@ mod tests {
             .plan_request("eth_getBalance", &json!([addr_hex(1), "latest"]))
             .unwrap()
         {
-            PlannedOp::Pir(op) => assert_eq!(op.key, addr(1)),
+            PlannedOp::Pir(op) => {
+                assert_eq!(op.key, addr(1));
+                assert_eq!(op.lane, PirLane::Account);
+            }
             PlannedOp::Fallback => panic!("expected PIR"),
         }
         assert!(matches!(
             router.plan_request("eth_getLogs", &json!([{}])).unwrap(),
+            PlannedOp::Fallback
+        ));
+        assert!(matches!(
+            router
+                .plan_request("eth_getCode", &json!([addr_hex(1), "latest"]))
+                .unwrap(),
             PlannedOp::Fallback
         ));
     }

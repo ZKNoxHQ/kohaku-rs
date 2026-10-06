@@ -26,7 +26,7 @@ Kohaku-rs is a collection of rust crates for working with Ethereum privacy proto
 - [`kohaku-fork-kit`](./crates/fork-kit/) - Forking kit for testing and development of kohaku-rs crates.
 - [`kohaku-pir-rpc`](./crates/pir-rpc/) - dual-endpoint Ethereum provider: PIR for private account reads, fallback JSON-RPC for everything else.
 - [`kohaku-tor-rpc`](./crates/tor-rpc/) - Alloy JSON-RPC over Arti with shared or session-isolated circuits.
-- [`kohaku-privacy-rpc`](./crates/privacy-rpc/) - batch-aware Tor + PIR privacy orchestrator for Alloy JSON-RPC.
+- [`kohaku-privacy-rpc`](./crates/privacy-rpc/) - batch-aware Tor + PIR privacy orchestrator (account + ERC-20 token PIR, Multicall3 packing, selective Tor isolation).
 
 ### Experiments
 

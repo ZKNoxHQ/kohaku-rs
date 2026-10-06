@@ -12,14 +12,17 @@ use crate::{
 
 /// Mix-and-match builder for the privacy orchestrator.
 ///
-/// `TorPIR` preset: `.tor(...).pir_over_tor(pir_url, datasets).connect()`.
+/// `TorPIR` preset: `.tor(...).pir_over_tor(accounts_url, token_url, datasets).connect()`.
 /// Future Helios+Tor: `.tor(...).verifier(helios).connect()` without PIR.
 pub struct PrivacyBuilder {
     rpc_url: Url,
     tor: Option<Arc<dyn TorRpcBackend>>,
-    async_lookup: Option<Arc<dyn AsyncLookupBackend>>,
-    /// When set, build [`TorPirLookup`] at `build_transport` time (needs tor).
-    pir_over_tor_url: Option<String>,
+    accounts_lookup: Option<Arc<dyn AsyncLookupBackend>>,
+    tokens_lookup: Option<Arc<dyn AsyncLookupBackend>>,
+    /// When set, build [`TorPirLookup`] for accounts at `build_transport` time.
+    pir_accounts_url: Option<String>,
+    /// Optional token-storage PIR URL.
+    pir_tokens_url: Option<String>,
     datasets: Vec<DatasetManifest>,
     isolation: Arc<dyn IsolationPolicy>,
     verifier: Option<Arc<dyn StateVerifier>>,
@@ -36,8 +39,10 @@ impl PrivacyBuilder {
         Ok(Self {
             rpc_url,
             tor: None,
-            async_lookup: None,
-            pir_over_tor_url: None,
+            accounts_lookup: None,
+            tokens_lookup: None,
+            pir_accounts_url: None,
+            pir_tokens_url: None,
             datasets: Vec::new(),
             isolation: Arc::new(DefaultIsolationPolicy),
             verifier: None,
@@ -58,27 +63,37 @@ impl PrivacyBuilder {
         self
     }
 
-    /// Enable PIR over **shared Tor** to `pir_url` (no circuit isolation).
+    /// Enable PIR over **shared Tor** to account and optional token PIR bases.
     ///
-    /// Builds a [`TorPirLookup`] that POSTs batch keys to `{pir_url}/lookup`
-    /// through [`TorRpcBackend::http_post`].
+    /// `token_pir_url`: `None` keeps ERC-20 `balanceOf` on fallback RPC (still
+    /// Multicall-packed). Pass `Some(url)` for the inspire storage table (`:18091`).
     #[must_use]
-    pub fn pir_over_tor(mut self, pir_url: &str, datasets: Vec<DatasetManifest>) -> Self {
-        self.pir_over_tor_url = Some(pir_url.to_string());
-        self.async_lookup = None;
+    pub fn pir_over_tor(
+        mut self,
+        accounts_pir_url: &str,
+        token_pir_url: Option<&str>,
+        datasets: Vec<DatasetManifest>,
+    ) -> Self {
+        self.pir_accounts_url = Some(accounts_pir_url.to_string());
+        self.pir_tokens_url = token_pir_url.map(str::to_string);
+        self.accounts_lookup = None;
+        self.tokens_lookup = None;
         self.datasets = datasets;
         self
     }
 
-    /// Enable PIR with a custom async lookup (e.g. tests, custom codecs).
+    /// Enable PIR with custom async lookups (e.g. inspire crypto pools).
     #[must_use]
     pub fn pir_lookup(
         mut self,
-        lookup: Arc<dyn AsyncLookupBackend>,
+        accounts: Arc<dyn AsyncLookupBackend>,
+        tokens: Option<Arc<dyn AsyncLookupBackend>>,
         datasets: Vec<DatasetManifest>,
     ) -> Self {
-        self.async_lookup = Some(lookup);
-        self.pir_over_tor_url = None;
+        self.accounts_lookup = Some(accounts);
+        self.tokens_lookup = tokens;
+        self.pir_accounts_url = None;
+        self.pir_tokens_url = None;
         self.datasets = datasets;
         self
     }
@@ -101,17 +116,25 @@ impl PrivacyBuilder {
     ///
     /// # Errors
     ///
-    /// Returns when Tor was not configured, or `pir_over_tor` URL is invalid.
+    /// Returns when Tor was not configured, or a PIR URL is invalid.
     pub fn build_transport(self) -> Result<PrivacyTransport, PrivacyError> {
         let tor = self
             .tor
             .ok_or_else(|| PrivacyError::Builder("tor backend is required".into()))?;
 
-        let async_lookup = if let Some(pir_url) = self.pir_over_tor_url {
-            Some(Arc::new(TorPirLookup::new(Arc::clone(&tor), &pir_url)?)
-                as Arc<dyn AsyncLookupBackend>)
+        let (accounts_lookup, tokens_lookup) = if let Some(accounts_url) = self.pir_accounts_url {
+            let accounts = Arc::new(TorPirLookup::new(Arc::clone(&tor), &accounts_url)?)
+                as Arc<dyn AsyncLookupBackend>;
+            let tokens = self
+                .pir_tokens_url
+                .map(|u| {
+                    TorPirLookup::new(Arc::clone(&tor), &u)
+                        .map(|l| Arc::new(l) as Arc<dyn AsyncLookupBackend>)
+                })
+                .transpose()?;
+            (Some(accounts), tokens)
         } else {
-            self.async_lookup
+            (self.accounts_lookup, self.tokens_lookup)
         };
 
         // Router is used for plan/classify only; its sync LookupBackend is inert.
@@ -122,7 +145,8 @@ impl PrivacyBuilder {
         ));
         Ok(PrivacyTransport::new(
             router,
-            async_lookup,
+            accounts_lookup,
+            tokens_lookup,
             tor,
             self.rpc_url,
             self.isolation,
@@ -147,20 +171,19 @@ impl PrivacyBuilder {
 
 /// Convenience: Tor + PIR-over-Tor → [`DynProvider`].
 ///
-/// Doc alias for the `TorPIR` provider composition.
-///
 /// # Errors
 ///
 /// Returns when a URL is invalid or Alloy connect fails.
 pub async fn connect_tor_pir(
     tor: TorRpc,
-    pir_url: &str,
+    accounts_pir_url: &str,
+    token_pir_url: Option<&str>,
     rpc_url: &str,
     datasets: Vec<DatasetManifest>,
 ) -> Result<DynProvider, PrivacyError> {
     PrivacyBuilder::new(rpc_url)?
         .tor(tor)
-        .pir_over_tor(pir_url, datasets)
+        .pir_over_tor(accounts_pir_url, token_pir_url, datasets)
         .connect()
         .await
 }

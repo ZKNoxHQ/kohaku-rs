@@ -2,6 +2,7 @@ use alloy::primitives::keccak256;
 use serde_json::Value;
 
 use crate::DatasetManifest;
+use crate::tokens::{BALANCE_OF_SELECTOR, PirToken, balance_of_calldata, pir_token_by_contract};
 
 /// Where a JSON-RPC method should be answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10,10 +11,23 @@ pub enum Route {
     AccountBalance,
     /// `eth_getTransactionCount` against the accounts dataset.
     AccountNonce,
+    /// Hardcoded ERC-20 `balanceOf` against the token storage PIR.
+    TokenBalance(TokenBalanceMatch),
     /// `eth_call` matched to a manifest dataset.
     Call(CallMatch),
     /// Forward to the fallback Ethereum node.
     Fallback,
+}
+
+/// A successful match against one of [`crate::tokens::PIR_TOKENS`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenBalanceMatch {
+    /// Token metadata (static).
+    pub token: &'static PirToken,
+    /// Holder address from `balanceOf` arg0.
+    pub holder: [u8; 20],
+    /// Derived storage PIR key.
+    pub key: Vec<u8>,
 }
 
 /// A successful `eth_call` match against a dataset advertisement.
@@ -27,21 +41,22 @@ pub struct CallMatch {
     pub value_encoding: String,
 }
 
-/// Method table: Phase-1 account routes plus manifest-driven `eth_call` matchers.
+/// Method table: Phase-1 account routes, hardcoded PIR tokens, plus optional
+/// manifest-driven `eth_call` matchers.
 #[derive(Clone, Debug, Default)]
 pub struct RouteTable {
     datasets: Vec<DatasetManifest>,
 }
 
 impl RouteTable {
-    /// Build from `/manifest` `datasets`. Account balance/nonce are always
-    /// PIR-routed (Phase 1), independent of this list.
+    /// Build from `/manifest` `datasets`. Account balance/nonce and the four
+    /// default ERC-20s are always PIR-routed, independent of this list.
     #[must_use]
     pub fn from_datasets(datasets: Vec<DatasetManifest>) -> Self {
         Self { datasets }
     }
 
-    /// Datasets used for `eth_call` matching.
+    /// Datasets used for secondary `eth_call` matching.
     #[must_use]
     pub fn datasets(&self) -> &[DatasetManifest] {
         &self.datasets
@@ -58,12 +73,12 @@ impl RouteTable {
             "eth_getTransactionCount" => Route::AccountNonce,
             "eth_call" => self
                 .classify_call(params)
-                .map_or(Route::Fallback, Route::Call),
+                .map_or(Route::Fallback, |r| r),
             _ => Route::Fallback,
         }
     }
 
-    fn classify_call(&self, params: &Value) -> Option<CallMatch> {
+    fn classify_call(&self, params: &Value) -> Option<Route> {
         let obj = params.as_array()?.first()?;
         let to = parse_address_value(obj.get("to")?)?;
         let data = parse_hex_bytes(obj.get("data").or_else(|| obj.get("input"))?)?;
@@ -71,6 +86,17 @@ impl RouteTable {
             return None;
         }
         let selector = &data[..4];
+        if selector == BALANCE_OF_SELECTOR
+            && let Some(token) = pir_token_by_contract(&to)
+        {
+            let holder = call_arg0_address(&data)?;
+            let key = token.balance_key(&holder);
+            return Some(Route::TokenBalance(TokenBalanceMatch {
+                token,
+                holder,
+                key,
+            }));
+        }
         for ds in &self.datasets {
             if ds.selectors.is_empty() {
                 continue;
@@ -92,14 +118,37 @@ impl RouteTable {
             } else {
                 ds.value_encoding.clone()
             };
-            return Some(CallMatch {
+            return Some(Route::Call(CallMatch {
                 dataset_id: ds.id.clone(),
                 key,
                 value_encoding,
-            });
+            }));
         }
         None
     }
+}
+
+/// Build a padding PIR op for `token.balanceOf(holder)` (no client RPC index).
+#[must_use]
+pub fn token_balance_op(token: &'static PirToken, holder: &[u8; 20]) -> crate::PirOp {
+    let token_index = crate::tokens::PIR_TOKENS
+        .iter()
+        .position(|t| t.symbol == token.symbol);
+    crate::PirOp {
+        lane: crate::PirLane::TokenStorage,
+        key: token.balance_key(holder),
+        decode: crate::PirDecode::TokenBalance {
+            flag_in_top_bit: token.flag_in_top_bit,
+        },
+        holder: Some(*holder),
+        token_index,
+    }
+}
+
+/// Hex calldata for `balanceOf(holder)` (tests / padding helpers).
+#[must_use]
+pub fn balance_of_data_hex(holder: &[u8; 20]) -> String {
+    format!("0x{}", hex::encode(balance_of_calldata(holder)))
 }
 
 fn block_tag_is_latest(params: &Value) -> bool {
@@ -216,6 +265,7 @@ pub(crate) fn encode_zero(encoding: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokens::PIR_TOKENS;
     use serde_json::json;
 
     #[test]
@@ -242,7 +292,24 @@ mod tests {
     }
 
     #[test]
-    fn matched_balance_of_routes_to_pir() {
+    fn usdc_balance_of_routes_to_token_pir() {
+        let table = RouteTable::default();
+        let mut holder = [0u8; 20];
+        holder[19] = 2;
+        let data = balance_of_data_hex(&holder);
+        let params = json!([{ "to": PIR_TOKENS[0].address, "data": data }, "latest"]);
+        match table.classify("eth_call", &params) {
+            Route::TokenBalance(m) => {
+                assert_eq!(m.token.symbol, "USDC");
+                assert_eq!(m.holder, holder);
+                assert_eq!(m.key, PIR_TOKENS[0].balance_key(&holder));
+            }
+            other => panic!("expected TokenBalance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matched_manifest_balance_of_still_works_for_other_contracts() {
         let table = RouteTable::from_datasets(vec![DatasetManifest {
             id: "erc20_balances".into(),
             selectors: vec!["0x70a08231".into()],
@@ -250,7 +317,7 @@ mod tests {
             value_encoding: "uint256".into(),
             ..DatasetManifest::default()
         }]);
-        let to = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+        let to = "0x0000000000000000000000000000000000000008";
         let holder = "0x0000000000000000000000000000000000000002";
         let data = format!("0x70a08231{:0>64}", holder.trim_start_matches("0x"));
         let params = json!([{ "to": to, "data": data }, "latest"]);

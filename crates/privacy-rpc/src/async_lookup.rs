@@ -1,8 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use kohaku_pir_rpc::{LookupBackend, PirProviderError};
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
+use tracing::info;
 use url::Url;
 
 use crate::TorRpcBackend;
@@ -18,6 +22,85 @@ pub trait AsyncLookupBackend: Send + Sync {
         &self,
         keys: &[Vec<u8>],
     ) -> Result<Vec<Option<Vec<u8>>>, PirProviderError>;
+}
+
+/// Default TTL for cached PIR values (covers a sequential balances scan).
+pub const DEFAULT_PIR_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Caches PIR results so four-token padding is not re-fetched on every sequential
+/// `balanceOf` HTTP request for the same holder.
+pub struct CachingAsyncLookup {
+    inner: Arc<dyn AsyncLookupBackend>,
+    ttl: Duration,
+    entries: Mutex<HashMap<Vec<u8>, (Instant, Option<Vec<u8>>)>>,
+}
+
+impl CachingAsyncLookup {
+    /// Wrap `inner` with a TTL cache.
+    #[must_use]
+    pub fn new(inner: Arc<dyn AsyncLookupBackend>, ttl: Duration) -> Self {
+        Self {
+            inner,
+            ttl,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Wrap with [`DEFAULT_PIR_CACHE_TTL`].
+    #[must_use]
+    pub fn with_default_ttl(inner: Arc<dyn AsyncLookupBackend>) -> Arc<Self> {
+        info!(ttl_secs = DEFAULT_PIR_CACHE_TTL.as_secs(), "PIR result cache enabled");
+        Arc::new(Self::new(inner, DEFAULT_PIR_CACHE_TTL))
+    }
+}
+
+#[async_trait]
+impl AsyncLookupBackend for CachingAsyncLookup {
+    async fn lookup_batch(
+        &self,
+        keys: &[Vec<u8>],
+    ) -> Result<Vec<Option<Vec<u8>>>, PirProviderError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = Instant::now();
+        let mut cached: Vec<Option<Option<Vec<u8>>>> = vec![None; keys.len()];
+        let mut miss_keys = Vec::new();
+        let mut miss_at = Vec::new();
+
+        {
+            let mut map = self.entries.lock().await;
+            map.retain(|_, (t, _)| now.duration_since(*t) < self.ttl);
+            for (i, key) in keys.iter().enumerate() {
+                if let Some((_, v)) = map.get(key) {
+                    cached[i] = Some(v.clone());
+                } else {
+                    miss_at.push(i);
+                    miss_keys.push(key.clone());
+                }
+            }
+        }
+
+        let hits = keys.len() - miss_keys.len();
+        if !miss_keys.is_empty() {
+            info!(
+                hits,
+                misses = miss_keys.len(),
+                "PIR cache: fetching misses"
+            );
+            let fetched = self.inner.lookup_batch(&miss_keys).await?;
+            let mut map = self.entries.lock().await;
+            for (j, idx) in miss_at.into_iter().enumerate() {
+                let value = fetched[j].clone();
+                map.insert(miss_keys[j].clone(), (now, value.clone()));
+                cached[idx] = Some(value);
+            }
+        } else {
+            info!(hits, "PIR cache: all hits");
+        }
+
+        Ok(cached.into_iter().map(|slot| slot.expect("filled")).collect())
+    }
 }
 
 /// Bridge a sync [`LookupBackend`] into [`AsyncLookupBackend`] via `spawn_blocking`.
@@ -158,6 +241,9 @@ fn parse_lookup_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use kohaku_pir_rpc::MapLookup;
 
     #[test]
     fn lookup_url_appends_path() {
@@ -172,5 +258,37 @@ mod tests {
         let out = parse_lookup_response(body, 2).unwrap();
         assert_eq!(out[0], None);
         assert_eq!(out[1], Some(vec![1, 2]));
+    }
+
+    struct CountingLookup {
+        inner: SyncLookupAdapter,
+        hits: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AsyncLookupBackend for CountingLookup {
+        async fn lookup_batch(
+            &self,
+            keys: &[Vec<u8>],
+        ) -> Result<Vec<Option<Vec<u8>>>, PirProviderError> {
+            self.hits.fetch_add(keys.len(), Ordering::SeqCst);
+            self.inner.lookup_batch(keys).await
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_avoids_repeat_fetches() {
+        let map = MapLookup::default();
+        map.insert([1u8; 20], vec![9]);
+        let counting = Arc::new(CountingLookup {
+            inner: SyncLookupAdapter::new(Arc::new(map)),
+            hits: AtomicUsize::new(0),
+        });
+        let cached = CachingAsyncLookup::new(counting.clone(), Duration::from_secs(60));
+        let key = vec![1u8; 20];
+        let a = cached.lookup_batch(std::slice::from_ref(&key)).await.unwrap();
+        let b = cached.lookup_batch(std::slice::from_ref(&key)).await.unwrap();
+        assert_eq!(a, b);
+        assert_eq!(counting.hits.load(Ordering::SeqCst), 1);
     }
 }

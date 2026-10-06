@@ -3,12 +3,14 @@
 use std::sync::Arc;
 
 use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket, ResponsePayload};
-use kohaku_pir_rpc::{MapFallback, MapLookup, PirRouter};
+use kohaku_pir_rpc::{
+    MapFallback, MapLookup, PIR_TOKENS, PirRouter, balance_of_data_hex,
+};
 use serde_json::{Value, json};
 use tower::Service;
 use url::Url;
 
-use crate::mock::{MockTorRpc, account_bytes, addr, addr_hex, serialize_req};
+use crate::mock::{MockTorRpc, account_bytes, addr, addr_hex, serialize_req, storage_cell};
 use crate::{
     DefaultIsolationPolicy, PrivacyBuilder, PrivacyTransport, SyncLookupAdapter, TorPirLookup,
 };
@@ -25,7 +27,24 @@ fn transport_with_sync_pir(lookup: MapLookup, tor: Arc<MockTorRpc>) -> PrivacyTr
     let async_lookup = Arc::new(SyncLookupAdapter::new(Arc::new(lookup)));
     PrivacyTransport::new(
         router(),
+        Some(async_lookup.clone()),
         Some(async_lookup),
+        tor,
+        Url::parse("https://eth.example").unwrap(),
+        Arc::new(DefaultIsolationPolicy),
+        None,
+    )
+}
+
+fn transport_with_dual_sync(
+    accounts: MapLookup,
+    tokens: MapLookup,
+    tor: Arc<MockTorRpc>,
+) -> PrivacyTransport {
+    PrivacyTransport::new(
+        router(),
+        Some(Arc::new(SyncLookupAdapter::new(Arc::new(accounts)))),
+        Some(Arc::new(SyncLookupAdapter::new(Arc::new(tokens)))),
         tor,
         Url::parse("https://eth.example").unwrap(),
         Arc::new(DefaultIsolationPolicy),
@@ -37,6 +56,7 @@ fn transport_with_tor_pir(tor: Arc<MockTorRpc>) -> PrivacyTransport {
     let lookup = Arc::new(TorPirLookup::new(Arc::clone(&tor) as _, "https://pir.example").unwrap());
     PrivacyTransport::new(
         router(),
+        Some(lookup.clone()),
         Some(lookup),
         tor,
         Url::parse("https://eth.example").unwrap(),
@@ -99,9 +119,31 @@ async fn pir_over_tor_uses_shared_http_post() {
         tor.http_post_urls()[0].ends_with("/lookup"),
         "posts go to PIR /lookup"
     );
-    // PIR must not use Ethereum JSON-RPC Tor lanes
     assert!(tor.shared_batches().is_empty());
     assert!(tor.isolated_batches().is_empty());
+}
+
+#[tokio::test]
+async fn account_balance_and_nonce_dedupe_one_lookup() {
+    let lookup = MapLookup::default();
+    lookup.insert(addr(1), account_bytes(10, 3));
+    let tor = Arc::new(MockTorRpc::default());
+    let t = transport_with_sync_pir(lookup, Arc::clone(&tor));
+    let packet = RequestPacket::Batch(vec![
+        serialize_req(
+            "eth_getBalance",
+            1,
+            json!([addr_hex(1), "latest"]),
+        ),
+        serialize_req(
+            "eth_getTransactionCount",
+            2,
+            json!([addr_hex(1), "latest"]),
+        ),
+    ]);
+    let values = success_values(call(t, packet).await);
+    assert_eq!(values[0], json!("0xa"));
+    assert_eq!(values[1], json!("0x3"));
 }
 
 #[tokio::test]
@@ -135,7 +177,7 @@ async fn builder_pir_over_tor_wires_lookup() {
     let transport = PrivacyBuilder::new("https://eth.example")
         .unwrap()
         .tor_backend(Arc::clone(&tor) as _)
-        .pir_over_tor("https://pir.example", Vec::new())
+        .pir_over_tor("https://pir.example", None, Vec::new())
         .build_transport()
         .unwrap();
     let packet = RequestPacket::Single(serialize_req(
@@ -167,7 +209,7 @@ async fn shared_fallbacks_coalesce_to_one_batch() {
 }
 
 #[tokio::test]
-async fn two_eoas_get_two_isolated_posts() {
+async fn two_eoas_get_two_isolated_multicalls() {
     let tor = Arc::new(MockTorRpc::default());
     tor.set("eth_call", json!("0x01"));
     let t = transport_with_sync_pir(MapLookup::default(), Arc::clone(&tor));
@@ -183,9 +225,14 @@ async fn two_eoas_get_two_isolated_posts() {
             json!([{ "to": addr_hex(2), "data": "0xdeadbeef" }, "latest"]),
         ),
     ]);
-    let _ = success_values(call(t, packet).await);
+    let values = success_values(call(t, packet).await);
+    assert_eq!(values[0], json!("0x01"));
+    assert_eq!(values[1], json!("0x01"));
     assert!(tor.shared_batches().is_empty());
     assert_eq!(tor.isolated_batches().len(), 2);
+    for batch in tor.isolated_batches() {
+        assert_eq!(batch, vec!["eth_call".to_string()]);
+    }
 }
 
 #[tokio::test]
@@ -224,6 +271,7 @@ async fn without_pir_all_methods_use_tor_rpc() {
     let t = PrivacyTransport::new(
         router(),
         None,
+        None,
         Arc::clone(&tor) as Arc<dyn crate::TorRpcBackend>,
         Url::parse("https://eth.example").unwrap(),
         Arc::new(DefaultIsolationPolicy),
@@ -236,6 +284,56 @@ async fn without_pir_all_methods_use_tor_rpc() {
     ));
     let values = success_values(call(t, packet).await);
     assert_eq!(values[0], json!("0xabc"));
+    // eth_getBalance packs into Multicall3 eth_call on isolated circuit
     assert_eq!(tor.isolated_batches().len(), 1);
+    assert_eq!(tor.isolated_batches()[0], vec!["eth_call".to_string()]);
     assert_eq!(tor.http_post_count(), 0);
+}
+
+#[tokio::test]
+async fn usdc_balance_of_uses_token_pir_and_pads_four() {
+    let holder = addr(5);
+    let accounts = MapLookup::default();
+    let tokens = MapLookup::default();
+    let mut word = [0u8; 32];
+    word[31] = 7;
+    for token in &PIR_TOKENS {
+        tokens.insert(token.balance_key(&holder).as_slice(), storage_cell(word));
+    }
+    let tor = Arc::new(MockTorRpc::default());
+    tor.set("eth_call", json!("0xdead"));
+    let t = transport_with_dual_sync(accounts, tokens, Arc::clone(&tor));
+
+    let data = balance_of_data_hex(&holder);
+    let packet = RequestPacket::Single(serialize_req(
+        "eth_call",
+        1,
+        json!([{ "to": PIR_TOKENS[0].address, "data": data }, "latest"]),
+    ));
+    let values = success_values(call(t, packet).await);
+    let mut expected = [0u8; 32];
+    expected[31] = 7;
+    assert_eq!(
+        values[0],
+        json!(format!("0x{}", hex::encode(expected)))
+    );
+    // No fallback Tor RPC — padding stays on PIR
+    assert!(tor.isolated_batches().is_empty());
+    assert!(tor.shared_batches().is_empty());
+}
+
+#[tokio::test]
+async fn get_code_stays_on_fallback() {
+    let tor = Arc::new(MockTorRpc::default());
+    tor.set("eth_getCode", json!("0x6080"));
+    let t = transport_with_sync_pir(MapLookup::default(), Arc::clone(&tor));
+    let packet = RequestPacket::Single(serialize_req(
+        "eth_getCode",
+        1,
+        json!([addr_hex(1), "latest"]),
+    ));
+    let values = success_values(call(t, packet).await);
+    assert_eq!(values[0], json!("0x6080"));
+    assert_eq!(tor.isolated_batches().len(), 1);
+    assert_eq!(tor.isolated_batches()[0], vec!["eth_getCode".to_string()]);
 }

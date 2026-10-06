@@ -6,22 +6,18 @@ Batch-aware privacy orchestrator that composes **Tor** (`kohaku-tor-rpc`) and
 ## Privacy stack
 
 1. **Tor underlay** — PIR server calls and Ethereum RPC both egress through Arti.
-2. **Prefer PIR** — allowlisted latest reads (`eth_getBalance`,
-   `eth_getTransactionCount`, matched `eth_call`) go to
-   [`TorPirLookup`](crate::TorPirLookup) over **shared** Tor HTTP (no isolation).
-3. **Fallback clear RPC** — everything else is plaintext JSON-RPC to the node,
-   still over Tor.
+2. **Prefer PIR** — allowlisted latest reads go over **shared** Tor HTTP:
+   - Account table (`:18090`): `eth_getBalance`, `eth_getTransactionCount`
+   - Token storage table (`:18091`): `balanceOf` for USDC / USDT / DAI / WETH
+3. **Fallback clear RPC** — everything else (including `eth_getCode` until
+   account blobs grow) is plaintext JSON-RPC to the node, still over Tor.
 4. **Selective isolation** — bulk/metadata methods share a Tor circuit;
    address-bearing fallbacks are grouped by EOA onto isolated circuits.
+5. **Multicall3 packing** — within each circuit group, eligible `eth_call` /
+   `eth_getBalance` calls become one Multicall3 `aggregate3`; siblings
+   (`eth_getLogs`, `eth_getCode`, …) ride in the same Tor JSON-RPC POST.
 
 ## Construction
-
-Standalone pieces still work on their own:
-
-- Tor-only: `TorRpc::shared_provider` / `with_isolated`
-- PIR-only: `PirRouter::with_rpc` + `PirConnect` (clearnet fallback; tests/local)
-
-Composed `TorPIR` (doc alias for this builder preset):
 
 ```rust,ignore
 use kohaku_privacy_rpc::{PrivacyBuilder, connect_tor_pir};
@@ -30,21 +26,35 @@ use kohaku_tor_rpc::TorRpc;
 let tor = TorRpc::connect().await?;
 let provider = PrivacyBuilder::new("https://eth.example")?
     .tor(tor.clone())
-    .pir_over_tor("https://pir.example", datasets)
+    .pir_over_tor(
+        "http://pir.example:18090",
+        Some("http://pir.example:18091"),
+        datasets,
+    )
     .connect()
     .await?;
-
-// or
-let provider = connect_tor_pir(tor, "https://pir.example", "https://eth.example", datasets).await?;
 ```
 
-`pir_over_tor` posts a JSON key batch to `{pir_url}/lookup` via shared Tor
-(`TorRpcBackend::http_post`). Replace the body codec later with inspire
-`pir-client` crypto; keep Tor as the HTTP transport.
+`pir_lookup(accounts, tokens, datasets)` accepts custom inspire crypto pools
+(see `local-pir-rpc`). Omit `tokens` to leave ERC-20 `balanceOf` on fallback RPC
+(still Multicall-packed).
 
-Tor-only / future Helios+Tor (no PIR): omit `.pir_over_tor(...)`. Optional
-`.verifier(helios)` and `.isolation_policy(custom)` slots avoid combinatorial
-provider types.
+## Batch planning
+
+One Alloy `RequestPacket` (single or batch) is classified once:
+
+1. **Account PIR** — unique keys only; `eth_getBalance` + `eth_getTransactionCount`
+   for the same EOA share one lookup and decode two fields.
+2. **Token PIR** — if a holder asks for any of the four default tokens, the
+   orchestrator pads to **all four** PIR lookups (privacy). Extra tokens stay on
+   fallback Multicall. `local-pir-rpc` wraps Tor PIR backends in a short TTL
+   cache so sequential per-token HTTP calls reuse the padded results instead of
+   re-fetching four Tor PIR lookups each time.
+3. **Fallback** — group by isolation policy; each group is one Tor POST with
+   Multicall3 + sibling RPCs. Groups run concurrently with both PIR lanes.
+
+`eth_getLogs` is never folded into Multicall3; callers still chunk historical
+ranges. Multiple already-chunked `eth_getLogs` can share one Shared Tor POST.
 
 ## Isolation policy
 
@@ -55,10 +65,3 @@ and chain metadata on the shared client; other fallbacks are
 
 PIR traffic always uses the **shared** Tor client (query privacy is provided by
 PIR; Tor anonymizes the client IP).
-
-## Batch planning
-
-One Alloy `RequestPacket` (single or batch) is classified once. PIR keys run
-through one shared-Tor `lookup_batch` POST. Fallback RPCs are coalesced into the
-fewest Tor POSTs possible (one shared batch + one isolated batch per EOA group)
-and executed concurrently with the PIR lane.
