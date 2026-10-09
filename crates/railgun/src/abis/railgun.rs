@@ -288,16 +288,37 @@ sol! {
         G1Point c;
     }
 
-    /// RelayAdapt: native wrap + shield entrypoint (see Railgun `RelayAdapt.json` ABI).
+    /// RelayAdapt (see Railgun `RelayAdapt.json` ABI): native wrap + shield entrypoint, and the
+    /// `relay` entrypoint broadcasters use to run calls after a transaction, such as
+    /// unwrapping the base token on unshield. `ActionData` is bound into the proofs through
+    /// `adaptParams`, see [`crate::transact::RelayAction`].
     contract RelayAdapt {
+        #[derive(Debug)]
         struct Call {
             address to;
             bytes data;
             uint256 value;
         }
+        #[derive(Debug)]
+        struct ActionData {
+            bytes31 random;
+            bool requireSuccess;
+            uint256 minGasLimit;
+            Call[] calls;
+        }
+        #[derive(Debug)]
+        struct TokenTransfer {
+            TokenData token;
+            address to;
+            uint256 value;
+        }
+        event CallError(uint256 callIndex, bytes revertReason);
         function multicall(bool _requireSuccess, Call[] calldata _calls) external payable;
+        function relay(Transaction[] calldata _transactions, ActionData calldata _actionData) external payable;
         function wrapBase(uint256 _amount) external;
+        function unwrapBase(uint256 _amount) external;
         function shield(ShieldRequest[] calldata _shieldRequests) external;
+        function transfer(TokenTransfer[] calldata _transfers) external;
     }
 }
 

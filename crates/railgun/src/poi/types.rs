@@ -125,6 +125,23 @@ pub struct TransactProofData {
     pub railgun_txid_if_has_unshield: Txid,
 }
 
+/// Proof that the inputs of a not yet mined operation have valid POIs, as required by Railgun
+/// broadcasters (`PreTransactionPOI` in the Railgun shared models).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreTransactionPoi {
+    #[serde(rename = "snarkProof")]
+    pub proof: Proof,
+    /// Root of the dummy txid proof, see `TxidLeafHash::dummy_proof`.
+    pub txid_merkleroot: MerkleRoot,
+    pub poi_merkleroots: Vec<MerkleRoot>,
+    pub blinded_commitments_out: Vec<BlindedCommitment>,
+    pub railgun_txid_if_has_unshield: Txid,
+}
+
+/// Pre-transaction POIs per list key, then per txid leaf hash (64 hex digits, no prefix).
+pub type PreTransactionPois = HashMap<ListKey, HashMap<String, PreTransactionPoi>>;
+
 impl ValidatedRailgunTxidStatus {
     pub fn tree(&self) -> u32 {
         (self.index >> 16) as u32

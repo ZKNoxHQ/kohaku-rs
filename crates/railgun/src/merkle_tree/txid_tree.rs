@@ -87,6 +87,17 @@ impl TxidMerkleTree {
 }
 
 impl TxidLeafHash {
+    /// Inclusion proof of a txid that is in no tree yet, as the Railgun engine builds it for
+    /// pre-transaction POI (`createDummyMerkleProof`): leaf at index 0, every sibling literally
+    /// zero (not the tree's zero value). Broadcasters recompute this root from the leaf.
+    pub fn dummy_proof(&self) -> MerkleProof {
+        let elements = vec![U256::ZERO; crate::merkle_tree::TREE_DEPTH];
+        let root = elements.iter().fold(self.0, |acc, sibling| {
+            poseidon_hash(&[acc, *sibling]).expect("poseidon on two field elements")
+        });
+        MerkleProof::new(self.0, elements, U256::ZERO, MerkleRoot::new(root))
+    }
+
     pub fn new(txid: Txid, utxo_tree_in: u32, out_utxo_tree_index: UtxoTreeIndex) -> Self {
         let global_position = out_utxo_tree_index.global_index();
 
@@ -154,5 +165,26 @@ impl UtxoTreeIndex {
         };
 
         tree_number * (TOTAL_LEAVES as u64) + start_index
+    }
+}
+
+#[cfg(test)]
+mod dummy_proof_tests {
+    use super::*;
+
+    #[test]
+    fn dummy_proof_is_a_zero_sibling_chain() {
+        let leaf = TxidLeafHash::from(U256::from(1234u64));
+        let proof = leaf.dummy_proof();
+
+        assert_eq!(proof.elements.len(), crate::merkle_tree::TREE_DEPTH);
+        assert!(proof.elements.iter().all(|e| *e == U256::ZERO));
+        assert_eq!(proof.indices, U256::ZERO);
+        assert!(proof.verify());
+
+        // Not the root of a real tree holding the leaf: real trees pad with the zero value.
+        let mut tree = TxidMerkleTree::new(0);
+        tree.insert_leaves(&[leaf], 0);
+        assert_ne!(proof.root, tree.root());
     }
 }

@@ -38,6 +38,9 @@ pub struct Operation {
 
     pub adapt_contract: Option<Address>,
     pub adapt_params: Option<[u8; 32]>,
+    /// Bound into the proof and enforced on-chain against `tx.gasprice`. Must stay 0 unless
+    /// the submitter of the EVM transaction is known to pay at least this price (broadcasters).
+    pub min_gas_price: u128,
 
     in_notes: Vec<UtxoNote>,
     out_notes: Vec<TransferNote>,
@@ -80,6 +83,7 @@ impl Operation {
             unshield_note: unshield,
             adapt_contract: None,
             adapt_params: None,
+            min_gas_price: 0,
         }
     }
 
@@ -93,6 +97,7 @@ impl Operation {
             unshield_note: None,
             adapt_contract: None,
             adapt_params: None,
+            min_gas_price: 0,
         }
     }
 

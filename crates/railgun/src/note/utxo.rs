@@ -72,7 +72,9 @@ impl UtxoNote {
         let viewing_pubkey = signer.viewing_key().public_key();
         let nullifying_key = signer.viewing_key().nullifying_key();
         let nullifier = poseidon_hash(&[nullifying_key.to_u256(), U256::from(leaf_index)]).unwrap();
-        let npk = note_public_key(spending_pubkey, nullifying_key, &random);
+        // Through the signer's master key, so that a view-only signer built from a
+        // 0zk address (master key known, spending public key unknown) derives correct notes.
+        let npk = note_public_key_from_master(signer.master_public_key(), &random);
         let hash = note_hash(npk, asset, value);
         let blinded_commitment = blinded_commitment(hash.into(), npk, tree_number, leaf_index);
 
@@ -212,13 +214,18 @@ fn note_hash(note_public_key: U256, asset: AssetId, value: u128) -> UtxoLeafHash
         .into()
 }
 
+#[allow(dead_code)]
 fn note_public_key(
     spending_pubkey: SpendingPublicKey,
     nullifying_key: NullifyingKey,
     random: &[u8; 16],
 ) -> U256 {
     let master_key = MasterPublicKey::new(spending_pubkey, nullifying_key);
+    note_public_key_from_master(master_key, random)
+}
 
+/// `npk = poseidon(masterPublicKey, random)`.
+pub fn note_public_key_from_master(master_key: MasterPublicKey, random: &[u8; 16]) -> U256 {
     poseidon_hash(&[master_key.to_u256(), U256::from_be_slice(random)]).unwrap()
 }
 

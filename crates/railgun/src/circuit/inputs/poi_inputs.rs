@@ -10,7 +10,8 @@ use crate::{
         railgun_txid::Txid,
     },
     merkle_tree::{
-        MerkleRoot, MerkleTree, MerkleTreeError, TREE_DEPTH, TxidLeafHash, TxidMerkleTree,
+        MerkleProof, MerkleRoot, MerkleTree, MerkleTreeError, TREE_DEPTH, TxidLeafHash,
+        TxidMerkleTree,
         UtxoTreeIndex,
     },
     poi::{note::PoiNote, types::ListKey},
@@ -141,11 +142,47 @@ impl PoiCircuitInputs {
         utxo_tree_out: UtxoTreeIndex,
         txid_tree: &TxidMerkleTree,
     ) -> Result<Self, PoiCircuitInputsError> {
-        info!("Generating POI inputs");
         let nullifiers: Vec<U256> = in_notes.iter().map(|note| note.inner.nullifier).collect();
         let txid = Txid::new(&nullifiers, out_commitments, bound_params_hash);
         let txid_leaf_hash = TxidLeafHash::new(txid, utxo_tree_in, utxo_tree_out);
         let txid_proof = txid_tree.generate_proof(txid_leaf_hash)?;
+        Self::from_inputs_with_txid_proof(
+            spending_pubkey,
+            nullifying_key,
+            utxo_tree_in,
+            bound_params_hash,
+            in_notes,
+            out_commitments,
+            out_npks,
+            out_values,
+            token_hash,
+            has_unshield,
+            list_key,
+            utxo_tree_out,
+            txid_proof,
+        )
+    }
+
+    /// Same as [`Self::from_inputs`] with the txid inclusion proof supplied by the caller. Used
+    /// for pre-transaction proofs, where the txid is in no tree yet and a dummy proof stands in.
+    pub fn from_inputs_with_txid_proof(
+        spending_pubkey: SpendingPublicKey,
+        nullifying_key: NullifyingKey,
+        utxo_tree_in: u32,
+        bound_params_hash: U256,
+        in_notes: &[PoiNote],
+        out_commitments: &[U256],
+        out_npks: &[U256],
+        out_values: &[U256],
+        token_hash: U256,
+        has_unshield: bool,
+        list_key: ListKey,
+        utxo_tree_out: UtxoTreeIndex,
+        txid_proof: MerkleProof,
+    ) -> Result<Self, PoiCircuitInputsError> {
+        info!("Generating POI inputs");
+        let nullifiers: Vec<U256> = in_notes.iter().map(|note| note.inner.nullifier).collect();
+        let txid = Txid::new(&nullifiers, out_commitments, bound_params_hash);
 
         let poi_proofs = in_notes
             .iter()
