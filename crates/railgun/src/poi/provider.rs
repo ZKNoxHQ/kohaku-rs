@@ -250,7 +250,7 @@ impl PoiProvider {
     }
 
     fn register(&mut self, op: &ProvedOperation, list_keys: Vec<ListKey>) {
-        let spending_pubkey = op.inner.from.spending_key().public_key();
+        let spending_pubkey = op.inner.from.spending_public_key();
         let txid = Txid::from_operation(op);
         let in_notes = op.inner.in_notes().to_vec();
         let out_notes = op.inner.out_notes();

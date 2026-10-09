@@ -17,6 +17,8 @@ pub mod provider;
 mod railgun_database;
 pub mod transact;
 
+pub use common::MaybeSend;
+
 #[cfg(all(wasm, parallel))]
 compile_error!("The `parallel` feature is not supported in WASM builds.");
 
