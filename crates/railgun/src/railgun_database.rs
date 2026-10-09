@@ -76,11 +76,7 @@ impl RailgunDB for Store {
             return Ok(Default::default());
         };
 
-        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(DatabaseError::other)?;
-        match envelope.v {
-            1 => Ok(serde_json::from_value(envelope.data).map_err(DatabaseError::other)?),
-            v => Err(DatabaseError::UnsupportedVersion(v)),
-        }
+        deserialize_envelope(&bytes, 1)
     }
 
     async fn set_utxo_indexer(&self, state: &UtxoIndexerState) -> Result<(), DatabaseError> {
@@ -96,11 +92,7 @@ impl RailgunDB for Store {
             return Ok(Default::default());
         };
 
-        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(DatabaseError::other)?;
-        match envelope.v {
-            1 => Ok(serde_json::from_value(envelope.data).map_err(DatabaseError::other)?),
-            v => Err(DatabaseError::UnsupportedVersion(v)),
-        }
+        deserialize_envelope(&bytes, 1)
     }
 
     async fn set_account(
@@ -120,13 +112,7 @@ impl RailgunDB for Store {
             return Ok(None);
         };
 
-        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(DatabaseError::other)?;
-        match envelope.v {
-            1 => Ok(Some(
-                serde_json::from_value(envelope.data).map_err(DatabaseError::other)?,
-            )),
-            v => Err(DatabaseError::UnsupportedVersion(v)),
-        }
+        deserialize_envelope(&bytes, 1).map(Some)
     }
 
     async fn set_utxo_tree(
@@ -144,11 +130,7 @@ impl RailgunDB for Store {
             return Ok(Default::default());
         };
 
-        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(DatabaseError::other)?;
-        match envelope.v {
-            1 => Ok(serde_json::from_value(envelope.data).map_err(DatabaseError::other)?),
-            v => Err(DatabaseError::UnsupportedVersion(v)),
-        }
+        deserialize_envelope(&bytes, 1)
     }
 
     async fn set_txid_indexer(&self, state: &TxidIndexerState) -> Result<(), DatabaseError> {
@@ -164,13 +146,7 @@ impl RailgunDB for Store {
             return Ok(None);
         };
 
-        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(DatabaseError::other)?;
-        match envelope.v {
-            1 => Ok(Some(
-                serde_json::from_value(envelope.data).map_err(DatabaseError::other)?,
-            )),
-            v => Err(DatabaseError::UnsupportedVersion(v)),
-        }
+        deserialize_envelope(&bytes, 1).map(Some)
     }
 
     async fn set_txid_tree(
@@ -188,11 +164,7 @@ impl RailgunDB for Store {
             return Ok(Default::default());
         };
 
-        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(DatabaseError::other)?;
-        match envelope.v {
-            1 => Ok(serde_json::from_value(envelope.data).map_err(DatabaseError::other)?),
-            v => Err(DatabaseError::UnsupportedVersion(v)),
-        }
+        deserialize_envelope(&bytes, 1)
     }
 
     async fn set_poi_provider(&self, state: &PoiProviderState) -> Result<(), DatabaseError> {
@@ -211,18 +183,42 @@ async fn write_envelope<S: Serialize>(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-struct Envelope {
-    pub v: u32,
-    pub data: serde_json::Value,
+/// Stored layout: `{"v": <version>, "data": <state>}`.
+///
+/// Written and read straight to and from `T`, never through `serde_json::Value`, which cannot
+/// hold an integer above `u64::MAX`: a note worth more than 18.44 units of an 18-decimal token
+/// made every account save fail with "number out of range" (the sync then stopped, and the synced
+/// block was never persisted). Same bytes on disk as before for values that fit.
+#[derive(Serialize)]
+struct EnvelopeRef<'a, T> {
+    v: u32,
+    data: &'a T,
+}
+
+#[derive(Deserialize)]
+struct EnvelopeVersion {
+    v: u32,
+}
+
+#[derive(Deserialize)]
+struct Envelope<T> {
+    data: T,
 }
 
 fn serialize_envelope<T: Serialize>(version: u32, data: &T) -> Result<Vec<u8>, DatabaseError> {
-    let envelope = Envelope {
-        v: version,
-        data: serde_json::to_value(data).map_err(DatabaseError::other)?,
-    };
-    Ok(serde_json::to_vec(&envelope).map_err(DatabaseError::other)?)
+    serde_json::to_vec(&EnvelopeRef { v: version, data }).map_err(DatabaseError::other)
+}
+
+fn deserialize_envelope<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    version: u32,
+) -> Result<T, DatabaseError> {
+    let EnvelopeVersion { v } = serde_json::from_slice(bytes).map_err(DatabaseError::other)?;
+    if v != version {
+        return Err(DatabaseError::UnsupportedVersion(v));
+    }
+    let envelope: Envelope<T> = serde_json::from_slice(bytes).map_err(DatabaseError::other)?;
+    Ok(envelope.data)
 }
 
 fn utxo_indexer_key() -> Vec<u8> {
@@ -247,4 +243,39 @@ fn txid_tree_key(tree_number: u32) -> Vec<u8> {
 
 fn poi_provider_key() -> Vec<u8> {
     b"poi_provider".to_vec()
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct Note {
+        value: u128,
+        tree: u32,
+    }
+
+    /// 56.5 WETH in wei is above `u64::MAX`: the envelope must keep it exactly.
+    #[test]
+    fn large_note_values_round_trip() {
+        let note = Note {
+            value: 56_502_370_000_000_000_000,
+            tree: 1,
+        };
+        let bytes = serialize_envelope(1, &note).unwrap();
+        assert_eq!(deserialize_envelope::<Note>(&bytes, 1).unwrap(), note);
+        assert!(matches!(
+            deserialize_envelope::<Note>(&bytes, 2),
+            Err(DatabaseError::UnsupportedVersion(1))
+        ));
+        // Data written by earlier versions (through serde_json::Value) still reads.
+        let old = br#"{"v":1,"data":{"value":1000,"tree":0}}"#;
+        assert_eq!(
+            deserialize_envelope::<Note>(old, 1).unwrap(),
+            Note {
+                value: 1000,
+                tree: 0
+            }
+        );
+    }
 }
