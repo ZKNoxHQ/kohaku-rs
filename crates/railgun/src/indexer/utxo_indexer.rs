@@ -266,25 +266,43 @@ impl UtxoIndexer {
                 continue;
             }
 
-            self.utxo_verifier
+            let known = self
+                .utxo_verifier
                 .verify_root(tree.number(), tree.leaves_len() as u32 - 1, tree.root())
                 .await
                 .map_err(|e| UtxoIndexerError::VerificationError(e))?;
+            // A root the chain never had means the local tree is missing or has wrong leaves:
+            // every proof built on it would revert ("Invalid Merkle Root"). Refuse to go on.
+            if !known {
+                return Err(UtxoIndexerError::VerificationError(
+                    format!(
+                        "local UTXO tree {} ({} leaves) has a root the chain never had: the \
+                         local database is inconsistent, clear it and sync again",
+                        tree.number(),
+                        tree.leaves_len()
+                    )
+                    .into(),
+                ));
+            }
         }
         Ok(())
     }
 
     /// Saves the current state of the indexer to the database.
+    ///
+    /// Trees are written before the synced block: if the process stops in between, the next run
+    /// resumes from the older block and re-inserts the same leaves (idempotent), instead of
+    /// believing it is synced while the saved tree lacks them.
     async fn save(&self) -> Result<(), DatabaseError> {
+        for (tree_number, tree) in self.utxo_trees.iter() {
+            self.db.set_utxo_tree(*tree_number, tree.state()).await?;
+        }
+
         let state = UtxoIndexerState {
             synced_block: self.synced_block,
             trees: self.utxo_trees.keys().cloned().collect(),
         };
         self.db.set_utxo_indexer(&state).await?;
-
-        for (tree_number, tree) in self.utxo_trees.iter() {
-            self.db.set_utxo_tree(*tree_number, tree.state()).await?;
-        }
 
         for account in self.accounts.iter() {
             self.db
@@ -293,5 +311,133 @@ impl UtxoIndexer {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(all(test, native))]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use kohaku_kv_store::{
+        Store,
+        backend::{KvStoreBackend, StoreError},
+        memory::MemoryStore,
+    };
+    use ruint::aliases::U256;
+
+    use super::*;
+    use crate::{
+        indexer::syncer::{LegacyCommitment, SyncEvent, SyncerError, UtxoSyncer},
+        merkle_tree::MerkleRoot,
+    };
+
+    /// One commitment at block 5 of a 10-block chain.
+    struct OneLeaf;
+
+    #[async_trait::async_trait]
+    impl UtxoSyncer for OneLeaf {
+        async fn latest_block(&self) -> Result<u64, SyncerError> {
+            Ok(10)
+        }
+
+        async fn sync(&self, from: u64, to: u64) -> Result<Vec<SyncEvent>, SyncerError> {
+            let leaf = LegacyCommitment { hash: U256::from(1), tree_number: 0, leaf_index: 0 };
+            Ok(if (from..=to).contains(&5) {
+                vec![SyncEvent::Legacy(leaf, 5)]
+            } else {
+                vec![]
+            })
+        }
+    }
+
+    /// Answers every root with the same verdict.
+    struct Verifier(bool);
+
+    #[async_trait::async_trait]
+    impl MerkleTreeVerifier for Verifier {
+        async fn verify_root(
+            &self,
+            _tree_number: u32,
+            _tree_index: u32,
+            _root: MerkleRoot,
+        ) -> Result<bool, Box<dyn std::error::Error + Send + Sync + 'static>> {
+            Ok(self.0)
+        }
+    }
+
+    /// In-memory backend that can be told to fail every write of one key: a process stopping
+    /// in the middle of a save.
+    #[derive(Clone)]
+    struct Faulty {
+        inner: Arc<MemoryStore>,
+        fail_on: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl Faulty {
+        fn new() -> Self {
+            Self { inner: Arc::new(MemoryStore::new()), fail_on: Arc::new(Mutex::new(None)) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvStoreBackend for Faulty {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+            self.inner.get_batch(keys).await
+        }
+
+        async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+            if let Some(key) = self.fail_on.lock().unwrap().as_deref() {
+                if items.iter().any(|(k, _)| *k == key) {
+                    return Err(StoreError::from(Box::<dyn std::error::Error + Send + Sync>::from(
+                        "simulated interruption",
+                    )));
+                }
+            }
+            self.inner.put_batch(items).await
+        }
+
+        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
+            self.inner.delete_batch(keys).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_root_the_chain_never_had_stops_the_sync() {
+        let mut indexer = UtxoIndexer::new(
+            Store::new(MemoryStore::new()),
+            Arc::new(OneLeaf),
+            Arc::new(Verifier(false)),
+        )
+        .await
+        .unwrap();
+
+        let err = indexer.sync_to(10).await.unwrap_err();
+        assert!(err.to_string().contains("root the chain never had"), "got: {err}");
+        assert_eq!(indexer.synced_block(), 0, "a rejected tree must not advance the sync");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_save_never_claims_unsaved_leaves() {
+        let backend = Faulty::new();
+        *backend.fail_on.lock().unwrap() = Some(b"utxo_tree:0".to_vec());
+
+        let mut indexer =
+            UtxoIndexer::new(Store::new(backend.clone()), Arc::new(OneLeaf), Arc::new(Verifier(true)))
+                .await
+                .unwrap();
+        assert!(indexer.sync_to(10).await.is_err(), "the tree write was made to fail");
+
+        // Next run: the saved synced block must not be ahead of the saved tree.
+        *backend.fail_on.lock().unwrap() = None;
+        let mut reloaded =
+            UtxoIndexer::new(Store::new(backend.clone()), Arc::new(OneLeaf), Arc::new(Verifier(true)))
+                .await
+                .unwrap();
+        assert_eq!(reloaded.synced_block(), 0, "blocks claimed whose leaves were never saved");
+
+        // And it recovers: the leaf is fetched again.
+        reloaded.sync_to(10).await.unwrap();
+        assert_eq!(reloaded.synced_block(), 10);
+        assert_eq!(reloaded.utxo_trees.get(&0).map(|t| t.leaves_len()), Some(1));
     }
 }
