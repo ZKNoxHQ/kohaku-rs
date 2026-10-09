@@ -97,6 +97,19 @@ impl Bundler for PimlicoBundler {
         })
     }
 
+    async fn gas_price(&self) -> Result<Option<super::GasPrice>, BundlerError> {
+        let price: PimlicoUserOperationGasPrice = self
+            .client
+            .request("pimlico_getUserOperationGasPrice", serde_json::json!([]))
+            .await
+            .map_err(|e| BundlerError::Other(Box::new(e)))?;
+        // Same tier as `estimate_gas`, so both paths quote the same price.
+        Ok(Some(super::GasPrice {
+            max_fee_per_gas: price.slow.max_fee_per_gas,
+            max_priority_fee_per_gas: price.slow.max_priority_fee_per_gas,
+        }))
+    }
+
     async fn send_user_operation(
         &self,
         op: &SignedUserOperation,
