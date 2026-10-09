@@ -2,7 +2,7 @@ use alloy::primitives::{Address, Bytes, FixedBytes};
 use js_sys::BigInt;
 use wasm_bindgen::prelude::*;
 
-use crate::provider::{Eip1193Error, Eip1193Provider, RawLog};
+use crate::provider::{AccountStateOverride, Eip1193Error, Eip1193Provider, RawLog};
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_INTERFACE: &str = r#"
@@ -16,6 +16,14 @@ export interface Eip1193Provider {
         toBlock: number | undefined,
     ): Promise<RawLog[]>;
     ethCall(to: `0x${string}`, data: `0x${string}`): Promise<`0x${string}`>;
+    ethCallOverrides(
+        from: `0x${string}`,
+        to: `0x${string}`,
+        data: `0x${string}`,
+        gas: `0x${string}`,
+        stateOverride: Record<`0x${string}`, { code?: `0x${string}`; balance?: `0x${string}` }>,
+    ): Promise<`0x${string}`>;
+    getCode(address: `0x${string}`): Promise<`0x${string}`>;
     estimateGas(to: `0x${string}`, from: `0x${string}` | undefined, data: `0x${string}`): Promise<bigint>;
     getGasPrice(): Promise<bigint>;
     getTransactionCount(address: `0x${string}`, block: number | undefined): Promise<bigint>;
@@ -48,6 +56,19 @@ extern "C" {
         to: &str,
         data: &str,
     ) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = "ethCallOverrides")]
+    pub async fn eth_call_overrides(
+        this: &JsEip1193Provider,
+        from: &str,
+        to: &str,
+        data: &str,
+        gas: &str,
+        state_override: JsValue,
+    ) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = "getCode")]
+    pub async fn get_code(this: &JsEip1193Provider, address: &str) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(method, catch, js_name = "estimateGas")]
     pub async fn estimate_gas(
@@ -119,6 +140,59 @@ impl Eip1193Provider for JsEip1193Provider {
             .map_err(|e| Eip1193Error::Decode(e.to_string()))?;
         let bytes = parse_hex_bytes(&hex_str)?;
         Ok(bytes.into())
+    }
+
+    async fn eth_call_overrides(
+        &self,
+        from: Address,
+        to: Address,
+        data: Bytes,
+        gas_limit: u64,
+        overrides: Vec<AccountStateOverride>,
+    ) -> Result<Bytes, Eip1193Error> {
+        // Build the eth_call state-override object: { "0xaddr": { code, balance } }.
+        // A plain JS object (not a Map) so it slots straight into eth_call's 3rd param.
+        let state = js_sys::Object::new();
+        for o in overrides {
+            let entry = js_sys::Object::new();
+            if let Some(code) = &o.code {
+                let v = JsValue::from_str(&format!("0x{}", hex::encode(code)));
+                js_sys::Reflect::set(&entry, &JsValue::from_str("code"), &v)
+                    .map_err(|e| Eip1193Error::Decode(format!("{:?}", e)))?;
+            }
+            if let Some(balance) = &o.balance {
+                let v = JsValue::from_str(&format!("{:#x}", balance));
+                js_sys::Reflect::set(&entry, &JsValue::from_str("balance"), &v)
+                    .map_err(|e| Eip1193Error::Decode(format!("{:?}", e)))?;
+            }
+            js_sys::Reflect::set(&state, &JsValue::from_str(&format!("{:#x}", o.address)), &entry)
+                .map_err(|e| Eip1193Error::Decode(format!("{:?}", e)))?;
+        }
+
+        let from_str = format!("{:#x}", from);
+        let to_str = format!("{:#x}", to);
+        let data_str = format!("0x{}", hex::encode(data));
+        let gas_str = format!("{:#x}", gas_limit);
+
+        let result = self
+            .eth_call_overrides(&from_str, &to_str, &data_str, &gas_str, state.into())
+            .await
+            .map_err(|e| Eip1193Error::Rpc(format!("{:?}", e)))?;
+
+        let hex_str: String = serde_wasm_bindgen::from_value(result)
+            .map_err(|e| Eip1193Error::Decode(e.to_string()))?;
+        Ok(parse_hex_bytes(&hex_str)?.into())
+    }
+
+    async fn get_code(&self, address: Address) -> Result<Bytes, Eip1193Error> {
+        let addr_str = format!("{:#x}", address);
+        let result = self
+            .get_code(&addr_str)
+            .await
+            .map_err(|e| Eip1193Error::Rpc(format!("{:?}", e)))?;
+        let hex_str: String = serde_wasm_bindgen::from_value(result)
+            .map_err(|e| Eip1193Error::Decode(e.to_string()))?;
+        Ok(parse_hex_bytes(&hex_str)?.into())
     }
 
     async fn estimate_gas(
