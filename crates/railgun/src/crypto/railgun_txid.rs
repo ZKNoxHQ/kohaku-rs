@@ -73,7 +73,11 @@ impl Serialize for Txid {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("{:064x}", self.0))
+        // `0x`-prefixed, like every other hash the POI node handles: the node files an
+        // unshield's POI event under the exact `railgunTxidIfHasUnshield` string it receives
+        // and is queried with `0x…`, so an unprefixed txid is stored but never found
+        // ("Missing"). Deserialization accepts both forms.
+        serializer.serialize_str(&format!("0x{:064x}", self.0))
     }
 }
 
@@ -111,5 +115,22 @@ uint!(34198991274555001477159037747741983086739304322809405028467147263259194165
         );
 
         insta::assert_debug_snapshot!(txid);
+    }
+
+    /// The POI node keys unshield events by this exact string and is queried with `0x…`: an
+    /// unshield submitted without the prefix was stored as `1f45f9b5…` and reported "Missing".
+    #[test]
+    fn serializes_with_0x_prefix_and_reads_both_forms() {
+        let txid = Txid(uint!(
+            14145334192381117455610722976495759459321720592535242446305209005202235904277_U256
+        ));
+        let json = serde_json::to_string(&txid).unwrap();
+        assert_eq!(
+            json,
+            "\"0x1f45f9b5e62ad8d114376490b4e50d83beac21c9df57f41e0787cc33165ed115\""
+        );
+        assert_eq!(serde_json::from_str::<Txid>(&json).unwrap(), txid);
+        let unprefixed = "\"1f45f9b5e62ad8d114376490b4e50d83beac21c9df57f41e0787cc33165ed115\"";
+        assert_eq!(serde_json::from_str::<Txid>(unprefixed).unwrap(), txid);
     }
 }
