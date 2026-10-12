@@ -5,20 +5,44 @@ use thiserror::Error;
 
 use crate::{
     account::{address::RailgunAddress, chain::ChainId},
-    crypto::keys::{SpendingKey, SpendingSignature, ViewingKey},
+    crypto::keys::{
+        MasterPublicKey, SpendingKey, SpendingPublicKey, SpendingSignature, ViewingKey,
+    },
 };
 
 use crate::common::MaybeSend;
 
 /// A railgun signer which can sign transactions and provide the associated 0xzk address.
+///
+/// The spending private key never crosses this interface, so it can be implemented by a
+/// signer that does not hold the key in memory, such as a hardware wallet. The viewing key
+/// does cross it: note scanning is an ECDH per encrypted note, unworkable over a device
+/// round-trip. This is the usual split for privacy protocols: hardware protects spending,
+/// view keys are exportable.
+///
+/// `sign` is async and fallible: on a hardware signer it is a transport round-trip plus a
+/// user confirmation, either of which can fail or be declined.
+#[cfg_attr(native, async_trait::async_trait)]
+#[cfg_attr(wasm, async_trait::async_trait(?Send))]
 pub trait RailgunSigner: MaybeSend {
     fn chain_id(&self) -> ChainId;
     fn viewing_key(&self) -> ViewingKey;
-    fn spending_key(&self) -> SpendingKey;
-    fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError>;
+    fn spending_public_key(&self) -> SpendingPublicKey;
+    async fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError>;
+
+    fn master_public_key(&self) -> MasterPublicKey {
+        MasterPublicKey::new(
+            self.spending_public_key(),
+            self.viewing_key().nullifying_key(),
+        )
+    }
 
     fn address(&self) -> RailgunAddress {
-        RailgunAddress::from_private_keys(self.spending_key(), self.viewing_key(), self.chain_id())
+        RailgunAddress::from_public_keys(
+            self.master_public_key(),
+            self.viewing_key().public_key(),
+            self.chain_id(),
+        )
     }
 }
 
@@ -32,6 +56,12 @@ pub struct PrivateKeySigner {
 #[derive(Debug, Error)]
 #[error("Signing error: {0}")]
 pub struct RailgunSignerError(#[source] Box<dyn std::error::Error + Send + Sync>);
+
+impl RailgunSignerError {
+    pub fn new(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self(source.into())
+    }
+}
 
 impl PrivateKeySigner {
     pub fn new(spending_key: SpendingKey, viewing_key: ViewingKey, chain_id: ChainId) -> Arc<Self> {
@@ -48,20 +78,22 @@ impl PrivateKeySigner {
     }
 }
 
+#[cfg_attr(native, async_trait::async_trait)]
+#[cfg_attr(wasm, async_trait::async_trait(?Send))]
 impl RailgunSigner for PrivateKeySigner {
     fn chain_id(&self) -> ChainId {
         self.chain_id
     }
 
-    fn spending_key(&self) -> SpendingKey {
-        self.spending_key
+    fn spending_public_key(&self) -> SpendingPublicKey {
+        self.spending_key.public_key()
     }
 
     fn viewing_key(&self) -> ViewingKey {
         self.viewing_key
     }
 
-    fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError> {
+    async fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError> {
         Ok(self.spending_key.sign(inputs))
     }
 }
@@ -108,5 +140,33 @@ mod tests {
             address.to_string(),
             "0zk1qynw6pq3nvntq90sts0khgs8ndqxzsrza88cd553dqwt28mskxlxtrv7j6fe3z53l7lczqdhfmfffxa8cps4hw7nprhx3hv3ykx097l8p7gjh2xla365qacrwu2"
         );
+        assert_eq!(
+            address,
+            RailgunAddress::from_private_keys(spending_key, viewing_key, ChainId::All)
+        );
+    }
+
+    #[tokio::test]
+    async fn signatures_verify_against_the_signer_public_key_only() {
+        let signer = PrivateKeySigner::new(
+            SpendingKey::from_hex(
+                "039b3b11110e49d7340cbe7171791972e3c0d94ef31b18d6ab93d7ace62d278a",
+            )
+            .unwrap(),
+            ViewingKey::from_hex(
+                "d345b2cc2f414aa93413b9572fa2b26e0e869e9274b006415a8d62ab1fa2dcb1",
+            )
+            .unwrap(),
+            ChainId::All,
+        );
+        let message = U256::from(42u64);
+        let signature = signer.sign(message).await.unwrap();
+        let public_key = signer.spending_public_key();
+
+        assert!(public_key.verify(message, &signature));
+        assert!(!public_key.verify(message + U256::from(1u64), &signature));
+
+        let other = SpendingKey::from_hex(&hex::encode([7u8; 32])).unwrap();
+        assert!(!other.public_key().verify(message, &signature));
     }
 }

@@ -44,7 +44,7 @@ pub enum TransactCircuitInputsError {
 }
 
 impl TransactCircuitInputs {
-    pub fn from_inputs(
+    pub async fn from_inputs(
         merkle_tree: &UtxoMerkleTree,
         bound_params_hash: U256,
         signer: Arc<dyn RailgunSigner>,
@@ -66,14 +66,14 @@ impl TransactCircuitInputs {
         let commitments: Vec<U256> = notes_out.iter().map(|note| note.hash().into()).collect();
 
         let token = asset.hash();
-        let public_key = signer.spending_key().public_key();
+        let public_key = signer.spending_public_key();
         let public_key = [public_key.x_u256(), public_key.y_u256()];
 
         let mut unsigned = vec![merkleroot.into(), bound_params_hash];
         unsigned.extend_from_slice(&nullifiers);
         unsigned.extend_from_slice(&commitments);
         let unsigned_hash = poseidon_hash(&unsigned).unwrap();
-        let signature = signer.sign(unsigned_hash)?;
+        let signature = signer.sign(unsigned_hash).await?;
         let signature = [signature.r8_x, signature.r8_y, signature.s];
 
         let random_in = notes_in

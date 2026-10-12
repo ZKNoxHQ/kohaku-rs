@@ -447,7 +447,8 @@ async fn prove_operation(
         operation.asset,
         operation.in_notes(),
         &operation.out_notes(),
-    )?;
+    )
+    .await?;
     let proof = prover
         .prove_transact(&inputs)
         .await
