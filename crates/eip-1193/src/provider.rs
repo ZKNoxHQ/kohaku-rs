@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use alloy::{
-    primitives::{Address, Bytes, FixedBytes, Log},
+    primitives::{Address, Bytes, FixedBytes, Log, U256},
     sol_types::SolCall,
 };
 use crate::common::MaybeSend;
@@ -28,6 +28,21 @@ pub trait Eip1193Provider: MaybeSend {
     ) -> Result<Vec<RawLog>, Eip1193Error>;
 
     async fn eth_call(&self, to: Address, data: Bytes) -> Result<Bytes, Eip1193Error>;
+
+    /// `eth_call` from an explicit `from`, with an explicit gas limit, applying per-account state
+    /// overrides (code and/or balance). Needed for the single-proof gas simulation, which runs the
+    /// validation probe at the EntryPoint from the verification-bypass origin.
+    async fn eth_call_overrides(
+        &self,
+        from: Address,
+        to: Address,
+        data: Bytes,
+        gas_limit: u64,
+        overrides: Vec<AccountStateOverride>,
+    ) -> Result<Bytes, Eip1193Error>;
+
+    /// `eth_getCode` at `address` (latest block).
+    async fn get_code(&self, address: Address) -> Result<Bytes, Eip1193Error>;
 
     async fn estimate_gas(
         &self,
@@ -57,6 +72,14 @@ pub trait Eip1193Caller: Eip1193Provider {
         let ret = self.eth_call(to, data).await?;
         C::abi_decode_returns(&ret).map_err(|e| Eip1193Error::Decode(e.to_string()))
     }
+}
+
+/// A per-account state override for [`Eip1193Provider::eth_call_overrides`].
+#[derive(Debug, Clone)]
+pub struct AccountStateOverride {
+    pub address: Address,
+    pub code: Option<Bytes>,
+    pub balance: Option<U256>,
 }
 
 pub trait IntoEip1193Provider {
