@@ -235,7 +235,13 @@ impl TxidIndexer {
         Ok(())
     }
 
+    /// Trees first, synced block last: an interrupted save must never leave a synced block that
+    /// is ahead of the saved trees (see `UtxoIndexer::save`).
     async fn save(&self) -> Result<(), DatabaseError> {
+        for (tree_number, tree) in self.trees.iter() {
+            self.db.set_txid_tree(*tree_number, tree.state()).await?;
+        }
+
         let state = TxidIndexerState {
             synced_block: self.inner.synced_block,
             trees: self.trees.keys().cloned().collect(),
@@ -245,10 +251,6 @@ impl TxidIndexer {
             own_ops: self.inner.own_ops.clone(),
         };
         self.db.set_txid_indexer(&state).await?;
-
-        for (tree_number, tree) in self.trees.iter() {
-            self.db.set_txid_tree(*tree_number, tree.state()).await?;
-        }
 
         Ok(())
     }
