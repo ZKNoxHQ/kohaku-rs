@@ -22,7 +22,7 @@ pub struct SpendingPublicKey {
     y: [u8; 32],
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SpendingSignature {
     pub r8_x: U256,
     pub r8_y: U256,
@@ -39,9 +39,11 @@ pub struct ViewingPublicKey([u8; 32]);
 #[derive(Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct MasterPublicKey([u8; 32]);
 
-/// Symmetric key for AES encryption.
+/// Symmetric key for AES encryption, `sha256` of an ed25519 Diffie-Hellman point. This is the
+/// Railgun engine's `getSharedSymmetricKey`, also used between a wallet and a broadcaster with an
+/// ephemeral [`ViewingKey`] on the wallet side.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub(crate) struct SharedKey([u8; 32]);
+pub struct SharedKey([u8; 32]);
 
 /// Key for nullifier derivation.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -282,10 +284,7 @@ impl ViewingKey {
         NullifyingKey::new(*self)
     }
 
-    pub(crate) fn derive_shared_key(
-        &self,
-        their_public: ViewingPublicKey,
-    ) -> Result<SharedKey, KeyError> {
+    pub fn derive_shared_key(&self, their_public: ViewingPublicKey) -> Result<SharedKey, KeyError> {
         let point = CompressedEdwardsY(their_public.0)
             .decompress()
             .ok_or(KeyError::DecompressionFailed)?;

@@ -10,13 +10,14 @@ pub mod chain_config;
 mod circuit;
 pub mod crypto;
 pub mod indexer;
-mod merkle_tree;
+pub mod merkle_tree;
 mod note;
 pub mod poi;
 pub mod provider;
 mod railgun_database;
 pub mod transact;
 
+pub use circuit::proof::Proof;
 pub use common::MaybeSend;
 
 #[cfg(all(wasm, parallel))]

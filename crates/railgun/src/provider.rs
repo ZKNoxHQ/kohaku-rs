@@ -24,10 +24,11 @@ use crate::{
     chain_config::ChainConfig,
     circuit::groth16_prover::Groth16Prover,
     indexer::utxo_indexer::{UtxoIndexer, UtxoIndexerError},
-    note::{Note, utxo::UtxoNote},
+    merkle_tree::{MerkleProof, UtxoTreeIndex},
+    note::Note,
     poi::{
         provider::{PoiProvider, PoiProviderError},
-        types::{BlindedCommitmentType, PoiStatus},
+        types::{BlindedCommitmentType, ListKey, OperationPoi, PoiStatus},
     },
     transact::{
         ShieldBuilder, TransactionBuilder, TransactionBuilderError,
@@ -111,6 +112,13 @@ pub struct SingleProofReport {
     pub paymaster_verification_limit: u128,
 }
 
+fn list_key_string(key: &crate::poi::types::ListKey) -> String {
+    serde_json::to_value(key)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// `tx.origin` for which the Railgun verifier skips the SNARK check (`VERIFICATION_BYPASS` in the
 /// contracts). Only meaningful as the `from` of an `eth_estimateGas` on a dummy-proof transaction.
 pub const VERIFICATION_BYPASS: Address =
@@ -141,6 +149,8 @@ pub enum RailgunProviderError {
     Bundler(#[from] BundlerError),
     #[error("RPC error: {0}")]
     Rpc(#[from] Eip1193Error),
+    #[error("POI is not enabled on this provider")]
+    PoiDisabled,
     #[error(
         "gas limits fixed before proving are too low: {what} needs {needed}, limit is {limit}. \
          Nothing was sent"
@@ -171,6 +181,107 @@ impl RailgunProvider {
             prover,
             poi_provider,
         })
+    }
+
+    /// Chain configuration this provider was built with.
+    pub fn chain(&self) -> &ChainConfig {
+        &self.chain
+    }
+
+    /// Last block the UTXO indexer has been synced to.
+    pub fn synced_block(&self) -> u64 {
+        self.utxo_indexer.synced_block()
+    }
+
+    /// Whether POI support is enabled on this provider.
+    pub fn poi_enabled(&self) -> bool {
+        self.poi_provider.is_some()
+    }
+
+    /// The EIP-1193 provider behind this instance (gas price, gas estimates), for flows built
+    /// outside the crate.
+    pub fn eth_provider(&self) -> Arc<dyn Eip1193Provider> {
+        self.provider.clone()
+    }
+
+    /// POI list keys this provider proves against, empty when POI is off.
+    pub fn poi_list_keys(&self) -> Vec<String> {
+        self.poi_provider
+            .as_ref()
+            // Not `to_string()`: Display renders "ListKey(…)", the wire form is the serde string.
+            .map(|p| p.list_keys().iter().map(list_key_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// Summaries of the post-transaction POI proofs still waiting to be submitted.
+    pub fn poi_pending(&self) -> Vec<crate::poi::provider::PendingPoiSummary> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| p.pending_summaries())
+            .unwrap_or_default()
+    }
+
+    /// Full state of a registered account (unspent, spent and sent notes).
+    pub fn account_state(&self, address: RailgunAddress) -> Option<IndexedAccountState> {
+        self.utxo_indexer.account_state(address)
+    }
+
+    /// Our own operations as kept by the txid indexer (POI enabled only), keyed
+    /// by the railgun txid as `0x` + 64 hex digits.
+    pub fn own_operations(&self) -> Vec<(String, Operation)> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| {
+                p.own_operations()
+                    .into_iter()
+                    .map(|(txid, op)| {
+                        let raw: U256 = txid.into();
+                        (format!("0x{raw:064x}"), op)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Railgun txids (`0x` + 64 hex digits) of past operations whose POI the
+    /// recovery pass found `Valid`.
+    pub fn poi_recovered_valid(&self) -> Vec<String> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| {
+                p.recovered_valid()
+                    .into_iter()
+                    .map(|t| {
+                        let raw: U256 = t.into();
+                        format!("0x{raw:064x}")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Asks the POI node for the status per list of one blinded commitment.
+    /// Empty when POI is off.
+    pub async fn probe_poi(
+        &mut self,
+        blinded_commitment: U256,
+        commitment_type: BlindedCommitmentType,
+    ) -> Vec<(String, Option<PoiStatus>)> {
+        match &mut self.poi_provider {
+            Some(p) => {
+                p.statuses_per_list(blinded_commitment.into(), commitment_type)
+                    .await
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// POI status per list keyed by blinded commitment (`0x` + 64 hex digits).
+    pub fn poi_statuses(&self) -> Vec<(String, Vec<(String, Option<PoiStatus>)>)> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| p.statuses())
+            .unwrap_or_default()
     }
 
     /// Register a signer with the provider. The provider will index and track
@@ -279,6 +390,25 @@ impl RailgunProvider {
             )
             .await?;
         Ok(ProvedTx::new(self.chain.railgun_smart_wallet, operations))
+    }
+
+    /// Proves the POI of a built operation for every list key, with its outputs at
+    /// `utxo_tree_out` and `txid_proof` as the inclusion proof of its txid leaf. For a
+    /// pre-transaction POI, pass [`UtxoTreeIndex::pre_inclusion`] and a proof of the leaf
+    /// `TxidLeafHash::new(Txid::from_operation(op), op.inner.utxo_tree_number, pre_inclusion)`.
+    /// Fails when POI is not enabled.
+    pub async fn prove_operation_pois(
+        &self,
+        operation: &ProvedOperation,
+        utxo_tree_out: UtxoTreeIndex,
+        txid_proof: MerkleProof,
+    ) -> Result<Vec<(ListKey, OperationPoi)>, RailgunProviderError> {
+        let Some(poi_provider) = &self.poi_provider else {
+            return Err(RailgunProviderError::PoiDisabled);
+        };
+        Ok(poi_provider
+            .prove_operation_pois(&self.prover, operation, utxo_tree_out, txid_proof)
+            .await?)
     }
 
     /// Build a transaction builder into a proved, signable transaction.
@@ -988,3 +1118,14 @@ mod abi {
         }
     );
 }
+
+// Read-model types re-exported for crates that do not reach into the indexer modules.
+// Aliased: `BlindedCommitmentType` is already imported privately above.
+pub use crate::{
+    indexer::{indexed_account::IndexedAccountState, syncer::Operation},
+    note::{
+        sent::SentNote,
+        utxo::{UtxoNote, blinded_commitment},
+    },
+    poi::types::BlindedCommitmentType as CommitmentKind,
+};

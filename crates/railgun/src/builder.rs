@@ -22,6 +22,8 @@ pub struct RailgunBuilder {
     db: Option<Store>,
     utxo_syncer: Option<Arc<dyn UtxoSyncer>>,
     poi: bool,
+    /// POI statuses and txid tree without proof generation or submission.
+    poi_read_only: bool,
 }
 
 impl RailgunBuilder {
@@ -33,6 +35,7 @@ impl RailgunBuilder {
             db: None,
             utxo_syncer: None,
             poi: false,
+            poi_read_only: false,
         }
     }
 
@@ -64,6 +67,15 @@ impl RailgunBuilder {
     #[must_use]
     pub fn with_poi(mut self) -> Self {
         self.poi = true;
+        self
+    }
+
+    /// Like [`Self::with_poi`], but the provider only reads statuses and syncs the
+    /// txid tree. It never generates, recovers or submits a proof. For view-only signers.
+    #[must_use]
+    pub fn with_poi_read_only(mut self) -> Self {
+        self.poi = true;
+        self.poi_read_only = true;
         self
     }
 
@@ -100,6 +112,8 @@ impl RailgunBuilder {
                 self.chain.list_keys.clone(),
             )
             .await?;
+            let mut poi_provider = poi_provider;
+            poi_provider.set_read_only(self.poi_read_only);
             Some(poi_provider)
         } else {
             None

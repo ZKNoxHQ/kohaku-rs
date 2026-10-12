@@ -4,4 +4,4 @@ pub(crate) mod provider;
 pub(crate) mod recovery;
 pub(crate) mod types;
 
-pub use types::PoiStatus;
+pub use types::{BlindedCommitment, ListKey, OperationPoi, PoiStatus};

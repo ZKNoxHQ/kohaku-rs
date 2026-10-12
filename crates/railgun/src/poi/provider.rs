@@ -26,7 +26,10 @@ use crate::{
         client::{PoiClient, PoiClientError, PoiNodeClient},
         note::PoiNote,
         recovery::RecoveryAccount,
-        types::{BlindedCommitment, BlindedCommitmentType, ListKey, PoiStatus, TransactProofData},
+        types::{
+            BlindedCommitment, BlindedCommitmentType, ListKey, OperationPoi, PoiStatus,
+            TransactProofData,
+        },
     },
     railgun_database::{DatabaseError, RailgunDB},
     transact::proved_transaction::ProvedOperation,
@@ -37,6 +40,9 @@ pub struct PoiProvider {
     db: Store,
     poi_client: PoiClient,
     txid_indexer: TxidIndexer,
+    /// Statuses and txid tree only, never generate or submit proofs. Required for
+    /// view-only signers, which cannot produce valid POI inputs.
+    read_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -58,6 +64,8 @@ pub enum PoiProviderError {
     ProofNotFound(BlindedCommitment, ListKey),
     #[error("Database error: {0}")]
     Database(#[from] DatabaseError),
+    #[error("POI proof error: {0}")]
+    Prove(Box<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -104,6 +112,18 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Non-sensitive view of a [`PendingPoiEntry`] for UIs.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPoiSummary {
+    pub txid: String,
+    pub utxo_tree_in: u32,
+    pub inputs: usize,
+    pub outputs: usize,
+    pub has_unshield: bool,
+    pub list_keys: Vec<String>,
+}
+
 #[derive(Debug, Error)]
 enum PendingPoiError {
     #[error("POI client error: {0}")]
@@ -137,7 +157,13 @@ impl PoiProvider {
             db,
             poi_client,
             txid_indexer,
+            read_only: false,
         })
+    }
+
+    /// Disables proof generation, recovery and submission.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
 
     pub async fn sync_to(
@@ -165,6 +191,11 @@ impl PoiProvider {
             );
         }
 
+        if self.read_only {
+            self.save().await?;
+            return Ok(());
+        }
+
         let recovered = self.recover_missing(accounts).await;
         if recovered > 0 {
             info!("Queued {recovered} past operation(s) for POI proof generation");
@@ -173,6 +204,78 @@ impl PoiProvider {
         self.submit_pending(prover).await;
         self.save().await?;
         Ok(())
+    }
+
+    /// Status per list of one blinded commitment, asked to the POI node now.
+    /// `status()` folds the lists into the worst status; this keeps them apart. A list that
+    /// cannot be reached yields `None`.
+    pub async fn statuses_per_list(
+        &mut self,
+        blinded_commitment: BlindedCommitment,
+        commitment_type: BlindedCommitmentType,
+    ) -> Vec<(String, Option<PoiStatus>)> {
+        let mut out = Vec::new();
+        for list_key in self.list_keys() {
+            let name = serde_json::to_value(&list_key)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| list_key.to_string());
+            let status = match self
+                .poi_client
+                .poi_status(&list_key, blinded_commitment, commitment_type)
+                .await
+            {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    debug!("POI status probe failed for {blinded_commitment} ({list_key}): {e}");
+                    None
+                }
+            };
+            out.push((name, status));
+        }
+        out
+    }
+
+    /// Past operations whose POI the recovery pass saw as `Valid` on the node.
+    pub fn recovered_valid(&self) -> Vec<Txid> {
+        self.inner.recovered_valid.iter().copied().collect()
+    }
+
+    /// Operations of the registered accounts that the txid indexer keeps in full.
+    pub fn own_operations(&self) -> Vec<(Txid, crate::indexer::syncer::Operation)> {
+        self.txid_indexer
+            .own_ops()
+            .map(|(txid, op)| (txid.clone(), op.clone()))
+            .collect()
+    }
+
+    /// Last known status per list of every blinded commitment probed so far,
+    /// keyed by the blinded commitment as `0x` + 64 hex digits.
+    pub fn statuses(&self) -> Vec<(String, Vec<(String, Option<PoiStatus>)>)> {
+        self.inner
+            .pois
+            .iter()
+            .map(|(commitment, per_list)| {
+                // Display is `BlindedCommitment(0x…)`, not zero-padded.
+                let raw = commitment.to_string();
+                let hex = raw
+                    .trim_start_matches("BlindedCommitment(")
+                    .trim_end_matches(')')
+                    .trim_start_matches("0x");
+                let key = format!("0x{:0>64}", hex);
+                let lists = per_list
+                    .iter()
+                    .map(|(list, info)| {
+                        let name = serde_json::to_value(list)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_else(|| list.to_string());
+                        (name, info.status.clone())
+                    })
+                    .collect();
+                (key, lists)
+            })
+            .collect()
     }
 
     pub async fn register_ops(
@@ -203,6 +306,26 @@ impl PoiProvider {
             self.save().await?;
         }
         Ok(removed)
+    }
+
+    /// Summaries of pending POI submissions.
+    pub fn pending_summaries(&self) -> Vec<PendingPoiSummary> {
+        self.inner
+            .pending
+            .iter()
+            .map(|e| PendingPoiSummary {
+                txid: format!("{:?}", e.txid),
+                utxo_tree_in: e.utxo_tree_in,
+                inputs: e.in_notes.len(),
+                outputs: e.out_commitments.len(),
+                has_unshield: e.has_unshield,
+                list_keys: e
+                    .list_keys
+                    .iter()
+                    .filter_map(|k| serde_json::to_value(k).ok()?.as_str().map(str::to_owned))
+                    .collect(),
+            })
+            .collect()
     }
 
     pub fn list_keys(&self) -> Vec<ListKey> {
@@ -322,6 +445,74 @@ impl PoiProvider {
             op.circuit_inputs.bound_params_hash
         );
         self.inner.pending.push(entry_from_op(op, list_keys));
+    }
+
+    /// Proves the POI of a built operation for every list key, with its outputs at
+    /// `utxo_tree_out` and `txid_proof` as the inclusion proof of its txid leaf.
+    ///
+    /// Post-transaction POIs are this circuit at the operation's real position with a proof
+    /// from the txid tree. A pre-transaction POI, which Railgun broadcasters require before
+    /// relaying, uses [`UtxoTreeIndex::pre_inclusion`] and a proof built by the caller, since
+    /// the txid is in no tree yet.
+    pub async fn prove_operation_pois(
+        &self,
+        prover: &Groth16Prover,
+        operation: &ProvedOperation,
+        utxo_tree_out: UtxoTreeIndex,
+        txid_proof: MerkleProof,
+    ) -> Result<Vec<(ListKey, OperationPoi)>, PoiProviderError> {
+        let list_keys = self.poi_client.list_keys();
+        let entry = entry_from_op(operation, list_keys.clone());
+        let (tree_out, index_out) = utxo_tree_out.position();
+        let mut result = Vec::with_capacity(list_keys.len());
+
+        for list_key in list_keys {
+            let mut in_notes = Vec::new();
+            for note in entry.in_notes.clone() {
+                let proof = self
+                    .poi_client
+                    .merkle_proof(&list_key, note.blinded_commitment.into())
+                    .await?;
+                in_notes.push(PoiNote::new(
+                    note,
+                    HashMap::from([(list_key.clone(), proof)]),
+                ));
+            }
+
+            let inputs = PoiCircuitInputs::from_inputs_with_txid_proof(
+                entry.spending_pubkey,
+                entry.nullifying_key,
+                entry.utxo_tree_in,
+                entry.bound_params_hash,
+                &in_notes,
+                &entry.out_commitments,
+                &entry.out_npks,
+                &entry.out_values,
+                entry.token_hash,
+                entry.has_unshield,
+                list_key.clone(),
+                utxo_tree_out,
+                txid_proof.clone(),
+            )
+            .map_err(|e| PoiProviderError::Prove(Box::new(e)))?;
+
+            let proof = prover
+                .prove_poi(&inputs)
+                .await
+                .map_err(|e| PoiProviderError::Prove(Box::new(e)))?;
+
+            result.push((
+                list_key,
+                OperationPoi {
+                    proof,
+                    txid_merkleroot: inputs.railgun_txid_merkleroot_after_transaction,
+                    poi_merkleroots: inputs.poi_merkleroots,
+                    blinded_commitments_out: blinded_commitments(&entry, tree_out, index_out),
+                    railgun_txid_if_has_unshield: inputs.railgun_txid_if_has_unshield,
+                },
+            ));
+        }
+        Ok(result)
     }
 
     async fn submit_pending(&mut self, prover: &Groth16Prover) {
