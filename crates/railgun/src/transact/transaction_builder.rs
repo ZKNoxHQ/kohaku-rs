@@ -31,6 +31,7 @@ use crate::{
     circuit::{
         groth16_prover::Groth16Prover,
         inputs::transact_inputs::{TransactCircuitInputs, TransactCircuitInputsError},
+        proof::Proof,
     },
     merkle_tree::UtxoMerkleTree,
     note::{
@@ -176,6 +177,33 @@ impl TransactionBuilder {
         utxo_trees: &BTreeMap<u32, UtxoMerkleTree>,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<ProvedOperation>, TransactionBuilderError> {
+        let operations = self.operations(in_notes, rng)?;
+        let proved = prove_operations(Some(prover), utxo_trees, chain_id, &operations, rng).await?;
+        Ok(proved)
+    }
+
+    /// Same as [`Self::build`] with an all-zero proof instead of a real one.
+    ///
+    /// The result has the exact calldata shape of the real transaction and is only good for gas
+    /// estimation with `from` (or `tx.origin`) set to the Railgun verification bypass address.
+    /// The signer is never asked to sign. Note randomness differs from a later [`Self::build`],
+    /// which does not change the gas used.
+    pub(crate) async fn build_dummy(
+        &self,
+        chain_id: u64,
+        in_notes: &[UtxoNote],
+        utxo_trees: &BTreeMap<u32, UtxoMerkleTree>,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<ProvedOperation>, TransactionBuilderError> {
+        let operations = self.operations(in_notes, rng)?;
+        prove_operations(None, utxo_trees, chain_id, &operations, rng).await
+    }
+
+    fn operations(
+        &self,
+        in_notes: &[UtxoNote],
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Operation>, TransactionBuilderError> {
         let groups = self.group_intents();
         let mut operations = build_groups(in_notes, groups, rng)?;
 
@@ -184,9 +212,7 @@ impl TransactionBuilder {
             op.adapt_params = self.adapt_params;
             op.verify()?;
         }
-
-        let proved = prove_operations(prover, utxo_trees, chain_id, &operations, rng).await?;
-        Ok(proved)
+        Ok(operations)
     }
 
     /// Group intents with the following rules:
@@ -392,7 +418,7 @@ fn add_change_note(operation: &mut Operation, asset: AssetId, rng: &mut impl Cry
 }
 
 async fn prove_operations(
-    prover: &Groth16Prover,
+    prover: Option<&Groth16Prover>,
     utxo_trees: &BTreeMap<u32, UtxoMerkleTree>,
     chain_id: u64,
     operations: &[Operation],
@@ -411,7 +437,7 @@ async fn prove_operations(
 }
 
 async fn prove_operation(
-    prover: &Groth16Prover,
+    prover: Option<&Groth16Prover>,
     utxo_tree: &UtxoMerkleTree,
     chain_id: u64,
     operation: &Operation,
@@ -440,19 +466,35 @@ async fn prove_operation(
         commitment_ciphertexts,
     );
 
-    let inputs = TransactCircuitInputs::from_inputs(
-        utxo_tree,
-        bound_params.hash(),
-        operation.from.clone(),
-        operation.asset,
-        operation.in_notes(),
-        &operation.out_notes(),
-    )
-    .await?;
-    let proof = prover
-        .prove_transact(&inputs)
-        .await
-        .map_err(|e| TransactionBuilderError::Prover(Box::new(e)))?;
+    // A dummy build (no prover) must not reach the signer: see `from_inputs_unsigned`.
+    let inputs = if prover.is_some() {
+        TransactCircuitInputs::from_inputs(
+            utxo_tree,
+            bound_params.hash(),
+            operation.from.clone(),
+            operation.asset,
+            operation.in_notes(),
+            &operation.out_notes(),
+        )
+        .await?
+    } else {
+        TransactCircuitInputs::from_inputs_unsigned(
+            utxo_tree,
+            bound_params.hash(),
+            operation.from.clone(),
+            operation.asset,
+            operation.in_notes(),
+            &operation.out_notes(),
+        )
+        .await?
+    };
+    let proof = match prover {
+        Some(prover) => prover
+            .prove_transact(&inputs)
+            .await
+            .map_err(|e| TransactionBuilderError::Prover(Box::new(e)))?,
+        None => Proof::zero(),
+    };
 
     let merkleroot: U256 = inputs.merkleroot.into();
     let transaction = abis::railgun::Transaction::new(
@@ -469,4 +511,124 @@ async fn prove_operation(
     );
 
     Ok(ProvedOperation::new(operation.clone(), inputs, transaction))
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::address;
+    use rand::random;
+
+    use super::*;
+    use crate::{account::signer::PrivateKeySigner, poi::types::BlindedCommitmentType};
+
+    const WETH: AssetId = AssetId::Erc20(address!("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"));
+    const USDC: AssetId = AssetId::Erc20(address!("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"));
+
+    fn note(
+        signer: &Arc<PrivateKeySigner>,
+        tree: u32,
+        leaf: u32,
+        asset: AssetId,
+        value: u128,
+    ) -> UtxoNote {
+        UtxoNote::new(
+            tree,
+            leaf,
+            signer.clone(),
+            asset,
+            value,
+            random(),
+            "",
+            BlindedCommitmentType::Shield,
+        )
+    }
+
+    fn tree_with(notes: &[UtxoNote], number: u32) -> BTreeMap<u32, UtxoMerkleTree> {
+        let mut tree = UtxoMerkleTree::new(number);
+        let mut leaves: Vec<_> = notes.iter().filter(|n| n.tree_number == number).collect();
+        leaves.sort_by_key(|n| n.leaf_index);
+        let hashes: Vec<_> = leaves.iter().map(|n| n.hash).collect();
+        tree.insert_leaves(&hashes, 0);
+        BTreeMap::from([(number, tree)])
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    /// Stands for a hardware or threshold signer: counts how often it is asked to sign.
+    struct CountingSigner {
+        inner: Arc<PrivateKeySigner>,
+        signatures: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg_attr(native, async_trait::async_trait)]
+    #[cfg_attr(wasm, async_trait::async_trait(?Send))]
+    impl RailgunSigner for CountingSigner {
+        async fn sign(
+            &self,
+            inputs: U256,
+        ) -> Result<
+            crate::crypto::keys::SpendingSignature,
+            crate::account::signer::RailgunSignerError,
+        > {
+            self.signatures
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.sign(inputs).await
+        }
+        fn spending_public_key(&self) -> crate::crypto::keys::SpendingPublicKey {
+            self.inner.spending_public_key()
+        }
+        fn viewing_key(&self) -> crate::crypto::keys::ViewingKey {
+            self.inner.viewing_key()
+        }
+        fn chain_id(&self) -> crate::account::chain::ChainId {
+            self.inner.chain_id()
+        }
+    }
+
+    /// A gas estimate must not cost a confirmation on a hardware wallet, or a threshold
+    /// signing ceremony.
+    #[test]
+    fn dummy_build_never_asks_the_signer() {
+        let key = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let me = Arc::new(CountingSigner {
+            inner: key.clone(),
+            signatures: Default::default(),
+        });
+        // Notes are owned by the same keys, whoever signs.
+        let notes = [note(&key, 0, 0, WETH, 100), note(&key, 0, 1, USDC, 1_000)];
+        let trees = tree_with(&notes, 0);
+
+        let builder = TransactionBuilder::new()
+            .transfer(me.clone(), other.address(), USDC, 500, "")
+            .transfer(me.clone(), other.address(), WETH, 25, "");
+        let dummy = block_on(builder.build_dummy(1, &notes, &trees, &mut rand::rng())).unwrap();
+
+        assert_eq!(dummy.len(), 2);
+        assert_eq!(me.signatures.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// The dummy build has the calldata shape of a real one, with an all-zero proof.
+    #[test]
+    fn dummy_build_has_a_zero_proof_and_the_real_shape() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let notes = [note(&me, 0, 0, WETH, 100)];
+        let trees = tree_with(&notes, 0);
+
+        let builder = TransactionBuilder::new().transfer(me.clone(), other.address(), WETH, 30, "");
+        let dummy = block_on(builder.build_dummy(1, &notes, &trees, &mut rand::rng())).unwrap();
+
+        let tx = &dummy[0].transaction;
+        assert_eq!(tx.proof.a.x, U256::ZERO);
+        assert_eq!(tx.proof.b.x, [U256::ZERO; 2]);
+        assert_eq!(tx.nullifiers.len(), 1);
+        assert_eq!(tx.commitments.len(), 2);
+        assert_eq!(tx.boundParams.commitmentCiphertext.len(), 2);
+    }
 }

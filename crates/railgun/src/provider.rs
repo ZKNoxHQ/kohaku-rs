@@ -4,7 +4,7 @@ use alloy::{
     primitives::{Address, B256, Bytes, U256},
     sol_types::SolCall,
 };
-use kohaku_eip_1193::provider::{Eip1193Error, Eip1193Provider};
+use kohaku_eip_1193::provider::{AccountStateOverride, Eip1193Error, Eip1193Provider};
 use rand::CryptoRng;
 use serde::Serialize;
 use thiserror::Error;
@@ -14,6 +14,7 @@ use kohaku_userop_kit::{
     bundler::{Bundler, BundlerError, BundlerExt},
     signable_user_operation::SignableUserOperation,
     smart_account::SmartAccount,
+    user_operation::UserOperationGasEstimate,
 };
 
 use crate::{
@@ -33,6 +34,23 @@ use crate::{
         proved_transaction::{ProvedOperation, ProvedTx},
     },
 };
+
+/// Gas limits are rounded up to a multiple of this, so small measurement noise between the
+/// simulation and the real UserOperation does not push a limit below what is needed.
+const GAS_BUCKET: u128 = 10_000;
+
+/// What [`RailgunProvider::simulate_gas_limits`] measured, for logging/inspection.
+#[derive(Debug, Clone)]
+pub struct GasSimulationDetails {
+    pub account_validation: u128,
+    pub paymaster_validation: u128,
+    pub call: u128,
+    pub call_limit: u128,
+    pub post_op: u128,
+    pub pre_verification: u128,
+    pub total: u128,
+    pub margin_percent: u32,
+}
 
 #[derive(Debug, Serialize)]
 #[cfg_attr(js, derive(tsify::Tsify))]
@@ -81,6 +99,23 @@ impl NoteEntry {
     }
 }
 
+/// What [`RailgunProvider::prepare_userop_single_proof`] did, for logs and UIs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleProofReport {
+    pub total_gas_limit: u128,
+    pub max_fee_per_gas: u128,
+    pub fee: u128,
+    /// Paymaster verification gas measured on the real proof, against the limit committed to.
+    pub paymaster_verification_measured: u128,
+    pub paymaster_verification_limit: u128,
+}
+
+/// `tx.origin` for which the Railgun verifier skips the SNARK check (`VERIFICATION_BYPASS` in the
+/// contracts). Only meaningful as the `from` of an `eth_estimateGas` on a dummy-proof transaction.
+pub const VERIFICATION_BYPASS: Address =
+    alloy::primitives::address!("0x000000000000000000000000000000000000dEaD");
+
 /// Interfaces with the RAILGUN protocol.
 pub struct RailgunProvider {
     chain: ChainConfig,
@@ -106,6 +141,15 @@ pub enum RailgunProviderError {
     Bundler(#[from] BundlerError),
     #[error("RPC error: {0}")]
     Rpc(#[from] Eip1193Error),
+    #[error(
+        "gas limits fixed before proving are too low: {what} needs {needed}, limit is {limit}. \
+         Nothing was sent"
+    )]
+    LimitsTooLow {
+        what: &'static str,
+        needed: u128,
+        limit: u128,
+    },
     #[error("Privacy Paymaster not configured for chain: {0}")]
     PrivacyPaymasterNotConfigured(u64),
     #[error("Other: {0}")]
@@ -214,6 +258,29 @@ impl RailgunProvider {
         }
     }
 
+    /// Builds the transaction with an all-zero proof, for gas estimation only.
+    ///
+    /// Call `eth_estimateGas` on the result with `from` set to [`VERIFICATION_BYPASS`]: the
+    /// Railgun verifier skips the SNARK check for that origin. Nothing is registered with the
+    /// POI provider and no proof is generated, so this is cheap enough to run before every quote.
+    /// Not usable on the ERC-4337 path, where the bundler simulates with its own origin.
+    pub async fn build_dummy(
+        &mut self,
+        builder: TransactionBuilder,
+        rng: &mut impl CryptoRng,
+    ) -> Result<ProvedTx, RailgunProviderError> {
+        let spendable_notes = self.spendable_notes().await;
+        let operations = builder
+            .build_dummy(
+                self.chain.id,
+                &spendable_notes,
+                &self.utxo_indexer.utxo_trees,
+                rng,
+            )
+            .await?;
+        Ok(ProvedTx::new(self.chain.railgun_smart_wallet, operations))
+    }
+
     /// Build a transaction builder into a proved, signable transaction.
     pub async fn build(
         &mut self,
@@ -227,6 +294,427 @@ impl RailgunProvider {
 
         let proved_tx = ProvedTx::new(self.chain.railgun_smart_wallet, operations);
         Ok(proved_tx)
+    }
+
+    /// The UserOperation [`Self::prepare_userop`] would build, with a dummy proof: same
+    /// calldata, same paymaster data, nothing proved and the spending signer never asked.
+    ///
+    /// It cannot be sent. It exists to be simulated from the verification bypass origin
+    /// ([`VERIFICATION_BYPASS`]), for instance with `kohaku_userop_kit::validation_probe`, so that
+    /// the gas limits, hence the fee, are known before the one real proof.
+    pub async fn dummy_userop<S: SmartAccount>(
+        &mut self,
+        builder: TransactionBuilder,
+        sender: &S,
+        fee_payer: Arc<dyn RailgunSigner>,
+        fee_token: Address,
+        calldata: &S::Call,
+        fee: u128,
+        gas: UserOperationGasEstimate,
+        rng: &mut impl CryptoRng,
+    ) -> Result<SignableUserOperation, RailgunProviderError> {
+        let (privacy_paymaster, railgun_fee_adapter) = self.paymaster_contracts(fee_token)?;
+        let fee_asset = AssetId::Erc20(fee_token);
+        let adapted = builder
+            .adapt(railgun_fee_adapter, *sender.address().into_word())
+            .transfer(
+                fee_payer,
+                paymaster_railgun_address(ChainId::evm(self.chain.id)),
+                fee_asset,
+                fee,
+                "fee",
+            );
+        let spendable_notes = self.spendable_notes().await;
+        let operations = adapted
+            .build_dummy(
+                self.chain.id,
+                &spendable_notes,
+                &self.utxo_indexer.utxo_trees,
+                rng,
+            )
+            .await?;
+        self.userop_from(
+            &operations,
+            sender,
+            calldata,
+            privacy_paymaster,
+            railgun_fee_adapter,
+            fee_token,
+            fee,
+            gas,
+        )
+        .await
+    }
+
+    /// Same result as [`Self::prepare_userop`] with exactly one proof, hence one spending
+    /// signature per operation, instead of one per round of the fee convergence loop.
+    ///
+    /// The loop exists because the fee depends on the gas, which the bundler only estimates by
+    /// simulating a UserOperation carrying a valid proof, itself bound to the fee. Here the
+    /// caller fixes `gas` beforehand, typically from a simulation of [`Self::dummy_userop`].
+    /// The fee is `total gas limit x maxFeePerGas`, as the privacy paymaster computes it, so
+    /// its check passes by construction.
+    ///
+    /// After proving, the paymaster verification gas is measured on the real proof and the
+    /// bundler is asked for its own estimate. If either exceeds a limit the call fails before
+    /// anything is sent: that costs a second signature, never funds.
+    pub async fn prepare_userop_single_proof<S: SmartAccount>(
+        &mut self,
+        builder: TransactionBuilder,
+        bundler: &dyn Bundler,
+        sender: &S,
+        fee_payer: Arc<dyn RailgunSigner>,
+        fee_token: Address,
+        calldata: S::Call,
+        gas: UserOperationGasEstimate,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(SignableUserOperation, SingleProofReport), RailgunProviderError> {
+        let (privacy_paymaster, railgun_fee_adapter) = self.paymaster_contracts(fee_token)?;
+        let fee_asset = AssetId::Erc20(fee_token);
+        let total_gas = gas.pre_verification_gas
+            + gas.verification_gas_limit
+            + gas.call_gas_limit
+            + gas.paymaster_verification_gas_limit.unwrap_or(0)
+            + gas.paymaster_post_op_gas_limit.unwrap_or(0);
+        let fee = total_gas * gas.max_fee_per_gas;
+
+        // The one proof. This is the only place the spending signer is used.
+        let adapted = builder
+            .adapt(railgun_fee_adapter, *sender.address().into_word())
+            .transfer(
+                fee_payer,
+                paymaster_railgun_address(ChainId::evm(self.chain.id)),
+                fee_asset,
+                fee,
+                "fee",
+            );
+        let operations = self.build_operation(adapted, rng).await?;
+        let signable = self
+            .userop_from(
+                &operations,
+                sender,
+                &calldata,
+                privacy_paymaster,
+                railgun_fee_adapter,
+                fee_token,
+                fee,
+                gas,
+            )
+            .await?;
+
+        // Check the limits against the real proof before anything leaves.
+        let pmv_limit = gas.paymaster_verification_gas_limit.unwrap_or(0);
+        let pmv_measured =
+            estimate_paymaster_verification_gas_limit(self.provider.as_ref(), &signable).await?;
+        if pmv_measured > pmv_limit {
+            return Err(RailgunProviderError::LimitsTooLow {
+                what: "paymaster verification",
+                needed: pmv_measured,
+                limit: pmv_limit,
+            });
+        }
+        let bundler_view = bundler.estimate_gas(&signable).await?;
+        for (what, needed, limit) in [
+            (
+                "pre-verification",
+                bundler_view.pre_verification_gas,
+                gas.pre_verification_gas,
+            ),
+            (
+                "account verification",
+                bundler_view.verification_gas_limit,
+                gas.verification_gas_limit,
+            ),
+            // Without execution calldata the call limit constrains nothing: a bundler's default
+            // there is not a requirement.
+            (
+                "call",
+                if signable.user_op.call_data.is_empty() {
+                    0
+                } else {
+                    bundler_view.call_gas_limit
+                },
+                gas.call_gas_limit,
+            ),
+        ] {
+            if needed > limit {
+                return Err(RailgunProviderError::LimitsTooLow {
+                    what,
+                    needed,
+                    limit,
+                });
+            }
+        }
+
+        if let Some(poi_provider) = &mut self.poi_provider {
+            poi_provider.register_ops(&operations).await?;
+        }
+        let report = SingleProofReport {
+            total_gas_limit: total_gas,
+            max_fee_per_gas: gas.max_fee_per_gas,
+            fee,
+            paymaster_verification_measured: pmv_measured,
+            paymaster_verification_limit: pmv_limit,
+        };
+        Ok((signable, report))
+    }
+
+    /// Simulate the ERC-4337 gas limits before proving, so the fee is fixed with one proof (hence
+    /// one spending signature) via [`Self::prepare_userop_single_proof`], instead of the iterative
+    /// re-proving [`Self::prepare_userop`] does.
+    ///
+    /// Runs the `userop_kit` validation probe at the EntryPoint from the verification-bypass
+    /// origin, over a dummy (zero-proof) UserOperation, using `eth_call` with state overrides. Two
+    /// rounds: the second uses what the first measured. The RPC must support state overrides.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn simulate_gas_limits<S: SmartAccount>(
+        &mut self,
+        builder: &TransactionBuilder,
+        bundler: &dyn Bundler,
+        sender: &S,
+        fee_payer: Arc<dyn RailgunSigner>,
+        fee_token: Address,
+        calldata: &S::Call,
+        has_call: bool,
+        margin_percent: u32,
+        rng: &mut impl CryptoRng,
+    ) -> Result<(UserOperationGasEstimate, GasSimulationDetails), RailgunProviderError> {
+        use kohaku_userop_kit::validation_probe::{self as probe, alto::AltoPolicy, pad_gas};
+
+        let price = bundler.gas_price().await?.ok_or_else(|| {
+            RailgunProviderError::Other(Box::new(std::io::Error::other(
+                "the bundler gives no gas price outside of a simulation",
+            )))
+        })?;
+
+        // The probe does not enforce limits: they only enter through `maxCost`, against which the
+        // paymaster checks the fee. Round one starts from plausible figures; round two uses what
+        // round one measured.
+        let mut gas = UserOperationGasEstimate {
+            pre_verification_gas: 150_000,
+            verification_gas_limit: 100_000,
+            call_gas_limit: if has_call { 150_000 } else { 20_000 },
+            paymaster_verification_gas_limit: Some(1_200_000),
+            paymaster_post_op_gas_limit: Some(50_000),
+            max_fee_per_gas: price.max_fee_per_gas,
+            max_priority_fee_per_gas: price.max_priority_fee_per_gas,
+        };
+        let total_of = |g: &UserOperationGasEstimate| {
+            g.pre_verification_gas
+                + g.verification_gas_limit
+                + g.call_gas_limit
+                + g.paymaster_verification_gas_limit.unwrap_or(0)
+                + g.paymaster_post_op_gas_limit.unwrap_or(0)
+        };
+
+        let mut measured = None;
+        for _round in 1..=2 {
+            let fee = total_of(&gas) * price.max_fee_per_gas;
+            let dummy = self
+                .dummy_userop(
+                    builder.clone(),
+                    sender,
+                    fee_payer.clone(),
+                    fee_token,
+                    calldata,
+                    fee,
+                    gas,
+                    rng,
+                )
+                .await?;
+            let max_cost = U256::from(dummy.total_gas_limit()) * U256::from(price.max_fee_per_gas);
+            let request = probe::request(&dummy, max_cost);
+
+            let mut overrides: Vec<AccountStateOverride> = request
+                .code_overrides
+                .iter()
+                .map(|(address, code)| AccountStateOverride {
+                    address: *address,
+                    code: Some(code.clone()),
+                    balance: None,
+                })
+                .collect();
+            if let Some((from, to)) = request.copy_code_from {
+                // The 7702 delegation of the fresh sender is not on-chain yet: give it the code
+                // it will delegate to.
+                let code = self.provider.get_code(from).await?;
+                overrides.push(AccountStateOverride {
+                    address: to,
+                    code: Some(code),
+                    balance: None,
+                });
+            }
+            overrides.push(AccountStateOverride {
+                address: VERIFICATION_BYPASS,
+                code: None,
+                balance: Some(U256::from(10u128.pow(24))),
+            });
+
+            let answer = self
+                .provider
+                .eth_call_overrides(
+                    VERIFICATION_BYPASS,
+                    request.to,
+                    request.data.clone(),
+                    25_000_000,
+                    overrides,
+                )
+                .await?;
+
+            let phases = probe::decode(&answer, has_call).map_err(|e| {
+                RailgunProviderError::Other(Box::new(std::io::Error::other(e.to_string())))
+            })?;
+
+            // The bundler prices paymaster data and signature as all non-zero bytes: take its way
+            // of counting, which is the higher one, and the usual margin.
+            let pre_verification =
+                probe::pre_verification_gas(&dummy).max(probe::alto::pre_verification_gas(&dummy));
+            gas.pre_verification_gas = pad_gas(pre_verification, margin_percent, GAS_BUCKET);
+            // The EntryPoint charges its own pre-validation work to this limit (AA26), which the
+            // probe cannot see: see `ENTRY_POINT_VALIDATION_OVERHEAD`.
+            gas.verification_gas_limit = pad_gas(
+                phases.account_validation + probe::ENTRY_POINT_VALIDATION_OVERHEAD,
+                margin_percent,
+                GAS_BUCKET,
+            );
+            // Execution calls: size from the bundler's own prediction, with half the margin. The
+            // one limit whose shortfall would strand funds on the ephemeral sender.
+            gas.call_gas_limit = if has_call {
+                pad_gas(
+                    AltoPolicy::PIMLICO_PUBLIC.call_gas_limit(phases.call_limit),
+                    margin_percent / 2,
+                    GAS_BUCKET,
+                )
+            } else {
+                30_000
+            };
+            gas.paymaster_verification_gas_limit = Some(pad_gas(
+                phases.paymaster_validation,
+                margin_percent,
+                GAS_BUCKET,
+            ));
+            gas.paymaster_post_op_gas_limit = Some(if phases.post_op_called {
+                pad_gas(phases.post_op, margin_percent, GAS_BUCKET).max(10_000)
+            } else {
+                10_000
+            });
+            let total = total_of(&gas);
+            measured = Some((phases, pre_verification, total));
+        }
+
+        let (phases, pre_verification, total) = measured.expect("two rounds ran");
+        Ok((
+            gas,
+            GasSimulationDetails {
+                account_validation: phases.account_validation,
+                paymaster_validation: phases.paymaster_validation,
+                call: phases.call,
+                call_limit: phases.call_limit,
+                post_op: phases.post_op,
+                pre_verification,
+                total,
+                margin_percent,
+            },
+        ))
+    }
+
+    /// Fixes the fee by simulation ([`Self::simulate_gas_limits`]) then proves exactly once
+    /// ([`Self::prepare_userop_single_proof`]): one spending signature, no iterative re-proving.
+    /// Falls back to nothing — if the simulation fails, the error is returned and nothing is
+    /// signed. `has_call` says whether `calldata` carries execution calls.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_userop_single<S: SmartAccount>(
+        &mut self,
+        builder: TransactionBuilder,
+        bundler: &dyn Bundler,
+        sender: &S,
+        fee_payer: Arc<dyn RailgunSigner>,
+        fee_token: Address,
+        calldata: S::Call,
+        has_call: bool,
+        margin_percent: u32,
+        rng: &mut impl CryptoRng,
+    ) -> Result<SignableUserOperation, RailgunProviderError> {
+        let (gas, details) = self
+            .simulate_gas_limits(
+                &builder,
+                bundler,
+                sender,
+                fee_payer.clone(),
+                fee_token,
+                &calldata,
+                has_call,
+                margin_percent,
+                rng,
+            )
+            .await?;
+        info!(
+            "Simulated before signing: account {}, paymaster {}, call {} used / {} limit, post-op {}, pre-verification {}; total {} gas with {}% margin",
+            details.account_validation,
+            details.paymaster_validation,
+            details.call,
+            details.call_limit,
+            details.post_op,
+            details.pre_verification,
+            details.total,
+            details.margin_percent,
+        );
+        let (signable, _report) = self
+            .prepare_userop_single_proof(
+                builder, bundler, sender, fee_payer, fee_token, calldata, gas, rng,
+            )
+            .await?;
+        Ok(signable)
+    }
+
+    fn paymaster_contracts(
+        &self,
+        fee_token: Address,
+    ) -> Result<(Address, Address), RailgunProviderError> {
+        let privacy_paymaster = self.chain.privacy_paymaster.ok_or(
+            RailgunProviderError::PrivacyPaymasterNotConfigured(self.chain.id),
+        )?;
+        let railgun_fee_adapter = self.chain.railgun_fee_adapter.ok_or(
+            RailgunProviderError::PrivacyPaymasterNotConfigured(self.chain.id),
+        )?;
+        if fee_token != self.chain.wrapped_base_token {
+            return Err(RailgunProviderError::Other(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Currently only the wrapped base token is supported for fee payment",
+            ))));
+        }
+        Ok((privacy_paymaster, railgun_fee_adapter))
+    }
+
+    /// UserOperation around already built operations, with the given gas figures.
+    #[allow(clippy::too_many_arguments, clippy::ptr_arg)]
+    async fn userop_from<S: SmartAccount>(
+        &self,
+        // `&Vec` because `get_fee_operation` takes one.
+        operations: &Vec<ProvedOperation>,
+        sender: &S,
+        calldata: &S::Call,
+        privacy_paymaster: Address,
+        railgun_fee_adapter: Address,
+        fee_token: Address,
+        fee: u128,
+        gas: UserOperationGasEstimate,
+    ) -> Result<SignableUserOperation, RailgunProviderError> {
+        let fee_asset = AssetId::Erc20(fee_token);
+        let fee_operation = get_fee_operation(operations, fee_asset, fee)?;
+        let fee_note = get_fee_note(fee_operation, fee_asset, fee)?;
+        let transactions = operations.iter().map(|op| op.transaction.clone()).collect();
+        let paymaster_data = encode_paymaster_data(
+            railgun_fee_adapter,
+            encode_railgun_adapter_data(fee_note.random(), fee_token, fee, transactions),
+        );
+        Ok(UserOperationBuilder::new_with_smart_account(sender)
+            .await
+            .map_err(|e| RailgunProviderError::Other(Box::new(e)))?
+            .with_call(calldata)
+            .with_paymaster_and_data(privacy_paymaster, Bytes::from(paymaster_data))
+            .with_gas(gas)
+            .build())
     }
 
     /// Build a transaction builder into a broadcastable 7702 UserOperation.
@@ -245,19 +733,7 @@ impl RailgunProvider {
         calldata: S::Call,
         rng: &mut impl CryptoRng,
     ) -> Result<SignableUserOperation, RailgunProviderError> {
-        let privacy_paymaster = self.chain.privacy_paymaster.ok_or(
-            RailgunProviderError::PrivacyPaymasterNotConfigured(self.chain.id),
-        )?;
-        let railgun_fee_adapter = self.chain.railgun_fee_adapter.ok_or(
-            RailgunProviderError::PrivacyPaymasterNotConfigured(self.chain.id),
-        )?;
-
-        if fee_token != self.chain.wrapped_base_token {
-            return Err(RailgunProviderError::Other(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Currently only the wrapped base token is supported for fee payment",
-            ))));
-        }
+        let (privacy_paymaster, railgun_fee_adapter) = self.paymaster_contracts(fee_token)?;
 
         let paymaster_railgun_address = paymaster_railgun_address(ChainId::evm(self.chain.id));
         let fee_asset = AssetId::Erc20(fee_token);
@@ -391,17 +867,7 @@ impl RailgunProvider {
         builder: TransactionBuilder,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<ProvedOperation>, RailgunProviderError> {
-        let in_notes = self.all_unspent().await;
-        let spendable_notes: Vec<UtxoNote> = if let Some(_) = self.poi_provider {
-            in_notes
-                .into_iter()
-                .filter(|(_, status)| *status == Some(PoiStatus::Valid))
-                .map(|(note, _)| note)
-                .collect()
-        } else {
-            in_notes.into_iter().map(|(note, _)| note).collect()
-        };
-
+        let spendable_notes = self.spendable_notes().await;
         let operations = builder
             .build(
                 &self.prover,
@@ -413,6 +879,20 @@ impl RailgunProvider {
             .await?;
 
         Ok(operations)
+    }
+
+    /// Notes usable as inputs: all unspent notes, restricted to POI-valid ones when POI is on.
+    async fn spendable_notes(&mut self) -> Vec<UtxoNote> {
+        let in_notes = self.all_unspent().await;
+        if self.poi_provider.is_some() {
+            in_notes
+                .into_iter()
+                .filter(|(_, status)| *status == Some(PoiStatus::Valid))
+                .map(|(note, _)| note)
+                .collect()
+        } else {
+            in_notes.into_iter().map(|(note, _)| note).collect()
+        }
     }
 }
 

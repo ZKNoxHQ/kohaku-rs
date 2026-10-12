@@ -29,6 +29,25 @@ pub struct G2Affine {
     pub y: [U256; 2],
 }
 
+impl Proof {
+    /// All-zero placeholder, accepted by the Railgun verifier only when `tx.origin` is the
+    /// verification bypass address, that is during gas estimation.
+    pub fn zero() -> Self {
+        let g1 = || G1Affine {
+            x: U256::ZERO,
+            y: U256::ZERO,
+        };
+        Proof {
+            a: g1(),
+            b: G2Affine {
+                x: [U256::ZERO; 2],
+                y: [U256::ZERO; 2],
+            },
+            c: g1(),
+        }
+    }
+}
+
 impl From<ark_groth16::Proof<ark_bn254::Bn254>> for Proof {
     fn from(proof: ark_groth16::Proof<ark_bn254::Bn254>) -> Self {
         use ark_ff::PrimeField;
