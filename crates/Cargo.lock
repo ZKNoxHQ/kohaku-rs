@@ -5475,6 +5475,7 @@ dependencies = [
  "cfg_aliases",
  "futures",
  "getrandom 0.2.17",
+ "gloo-timers",
  "insta",
  "reqwest 0.13.4",
  "serde",
@@ -5482,6 +5483,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "web-time",
 ]
 
 [[package]]
