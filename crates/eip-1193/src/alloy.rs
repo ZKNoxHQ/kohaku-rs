@@ -10,7 +10,7 @@ use alloy::{
 };
 
 use crate::{
-    provider::{Eip1193Error, Eip1193Provider, IntoEip1193Provider, RawLog},
+    provider::{AccountStateOverride, Eip1193Error, Eip1193Provider, IntoEip1193Provider, RawLog},
     tx_data::TxData,
 };
 
@@ -74,6 +74,38 @@ impl Eip1193Provider for Alloy {
     async fn eth_call(&self, to: Address, data: Bytes) -> Result<Bytes, Eip1193Error> {
         let request = TransactionRequest::default().to(to).with_input(data);
         Ok(self.inner.call(request).await?)
+    }
+
+    async fn eth_call_overrides(
+        &self,
+        from: Address,
+        to: Address,
+        data: Bytes,
+        gas_limit: u64,
+        overrides: Vec<AccountStateOverride>,
+    ) -> Result<Bytes, Eip1193Error> {
+        use alloy::rpc::types::state::{AccountOverride, StateOverride};
+        let mut state = StateOverride::default();
+        for o in overrides {
+            let mut ao = AccountOverride::default();
+            if let Some(code) = o.code {
+                ao = ao.with_code(code);
+            }
+            if let Some(balance) = o.balance {
+                ao = ao.with_balance(balance);
+            }
+            state.insert(o.address, ao);
+        }
+        let request = TransactionRequest::default()
+            .from(from)
+            .to(to)
+            .with_input(data)
+            .gas_limit(gas_limit);
+        Ok(self.inner.call(request).overrides(state).await?)
+    }
+
+    async fn get_code(&self, address: Address) -> Result<Bytes, Eip1193Error> {
+        Ok(self.inner.get_code_at(address).await?)
     }
 
     async fn estimate_gas(
