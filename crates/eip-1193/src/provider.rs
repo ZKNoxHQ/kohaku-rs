@@ -90,24 +90,24 @@ pub enum Eip1193Error {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(target_arch = "wasm32", derive(tsify::Tsify))]
+#[cfg_attr(js, derive(tsify::Tsify))]
 pub struct RawLog {
-    #[cfg_attr(target_arch = "wasm32", tsify(type = "number | null"))]
+    #[cfg_attr(js, tsify(type = "number | null"))]
     pub block_number: Option<u64>,
 
-    #[cfg_attr(target_arch = "wasm32", tsify(type = "number | null"))]
+    #[cfg_attr(js, tsify(type = "number | null"))]
     pub block_timestamp: Option<u64>,
 
-    #[cfg_attr(target_arch = "wasm32", tsify(type = "`0x${string}` | null"))]
+    #[cfg_attr(js, tsify(type = "`0x${string}` | null"))]
     pub transaction_hash: Option<FixedBytes<32>>,
 
-    #[cfg_attr(target_arch = "wasm32", tsify(type = "`0x${string}`"))]
+    #[cfg_attr(js, tsify(type = "`0x${string}`"))]
     pub address: Address,
 
-    #[cfg_attr(target_arch = "wasm32", tsify(type = "`0x${string}`[]"))]
+    #[cfg_attr(js, tsify(type = "`0x${string}`[]"))]
     pub topics: Vec<FixedBytes<32>>,
 
-    #[cfg_attr(target_arch = "wasm32", tsify(type = "`0x${string}`"))]
+    #[cfg_attr(js, tsify(type = "`0x${string}`"))]
     pub data: Bytes,
 }
 

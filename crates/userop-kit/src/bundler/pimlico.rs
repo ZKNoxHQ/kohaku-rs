@@ -1,10 +1,9 @@
-use std::time::{Duration, Instant};
 
 use alloy::primitives::B256;
 use reqwest::Url;
 use serde::Deserialize;
-use tokio::time::sleep;
 use tracing::info;
+use web_time::{Duration, Instant};
 
 use crate::{
     bundler::{Bundler, BundlerError, rpc_client::RpcClient},
@@ -135,4 +134,14 @@ impl Bundler for PimlicoBundler {
 
         Err(BundlerError::Timeout)
     }
+}
+
+#[cfg(native)]
+async fn sleep(duration: Duration) {
+    tokio::time::sleep(duration).await;
+}
+
+#[cfg(wasm)]
+async fn sleep(duration: Duration) {
+    gloo_timers::future::sleep(duration).await;
 }
