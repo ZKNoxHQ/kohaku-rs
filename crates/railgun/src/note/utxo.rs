@@ -68,7 +68,7 @@ impl UtxoNote {
         memo: &str,
         commitment_type: BlindedCommitmentType,
     ) -> Self {
-        let spending_pubkey = signer.spending_key().public_key();
+        let spending_pubkey = signer.spending_public_key();
         let viewing_pubkey = signer.viewing_key().public_key();
         let nullifying_key = signer.viewing_key().nullifying_key();
         let nullifier = poseidon_hash(&[nullifying_key.to_u256(), U256::from(leaf_index)]).unwrap();

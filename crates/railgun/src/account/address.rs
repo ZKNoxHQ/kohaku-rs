@@ -82,6 +82,12 @@ impl RailgunAddress {
     pub fn chain(&self) -> ChainId {
         self.chain_id
     }
+
+    /// The same keys under another advisory chain ID, e.g. the chain-agnostic form.
+    pub fn with_chain(mut self, chain_id: ChainId) -> Self {
+        self.chain_id = chain_id;
+        self
+    }
 }
 
 impl Display for RailgunAddress {
