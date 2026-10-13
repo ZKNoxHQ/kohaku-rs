@@ -67,8 +67,18 @@ pub enum RemoteArtifactLoaderError {
 
 impl Default for RemoteArtifactLoader {
     fn default() -> Self {
+        // kassandraoftroy/kohaku-artifacts, pinned to a commit (never a branch) so the files
+        // cannot change under a release: transaction circuits as in
+        // Robert-MacWha/privacy-protocol-artifacts, POI circuits regenerated from
+        // railgun-ppoi-circuit-artifacts 0.0.1 with bin/convert_artifacts.rs (see
+        // artifacts/railgun/poi/PROVENANCE.md there). To update: regenerate, push, and bump the
+        // commit here.
+        //
+        // raw.githubusercontent.com serves the files directly with
+        // `access-control-allow-origin: *`. The github.com/.../raw/ form 301-redirects with no
+        // CORS header, which fails browser (wasm) fetches.
         Self::new(
-            "https://github.com/Robert-MacWha/privacy-protocol-artifacts/raw/refs/heads/main/artifacts/",
+            "https://raw.githubusercontent.com/kassandraoftroy/kohaku-artifacts/98e6a5255ae4a12bcc1fdaa8ba3bfcf2e805166d/artifacts/",
         )
     }
 }
