@@ -85,6 +85,23 @@ pub struct PendingPoiEntry {
     pub token_hash: U256,
     pub has_unshield: bool,
     pub list_keys: Vec<ListKey>,
+    /// Seconds since the epoch when the entry was queued, 0 for entries written
+    /// before the field existed. Used to tell an operation still in flight from one that never
+    /// reached the chain.
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+/// How long a proved operation may stay unmined before its pending POI is dropped.
+/// Relayer quotes last a few minutes; past this, a transaction whose inputs are still unspent
+/// was not sent.
+const UNMINED_GRACE_SECS: u64 = 15 * 60;
+
+fn now_secs() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Error)]
@@ -140,6 +157,14 @@ impl PoiProvider {
         let poi_client = self.poi_client.clone();
         self.txid_indexer.sync_to(to_block, &poi_client).await?;
 
+        let dropped = self.prune_unmined(accounts);
+        if dropped > 0 {
+            info!(
+                "Dropped {dropped} pending POI entr{} of operations that never reached the chain",
+                if dropped == 1 { "y" } else { "ies" }
+            );
+        }
+
         let recovered = self.recover_missing(accounts).await;
         if recovered > 0 {
             info!("Queued {recovered} past operation(s) for POI proof generation");
@@ -160,6 +185,24 @@ impl PoiProvider {
         }
         self.save().await?;
         Ok(())
+    }
+
+    /// Drops the pending entries of operations that were proved but never reached
+    /// the chain (a relayer that did not answer). Their txid will never be validated, so they
+    /// would be retried, and fail, at every sync. Should the transaction land later after all,
+    /// `recover_missing` rebuilds the entry from chain data.
+    pub async fn discard_ops(
+        &mut self,
+        operations: &[ProvedOperation],
+    ) -> Result<usize, PoiProviderError> {
+        let txids: Vec<Txid> = operations.iter().map(Txid::from_operation).collect();
+        let before = self.inner.pending.len();
+        self.inner.pending.retain(|e| !txids.contains(&e.txid));
+        let removed = before - self.inner.pending.len();
+        if removed > 0 {
+            self.save().await?;
+        }
+        Ok(removed)
     }
 
     pub fn list_keys(&self) -> Vec<ListKey> {
@@ -185,6 +228,30 @@ impl PoiProvider {
             worst = worst.max(status);
         }
         Ok(worst)
+    }
+
+    /// Drops pending entries of operations that were proved but never mined.
+    ///
+    /// A mined operation nullifies every one of its inputs. So, once the UTXO indexer is synced,
+    /// an entry with an input still unspent is not on-chain; past the grace period it will not
+    /// be, because the relayer's quote has expired. And an entry whose inputs were spent by an
+    /// operation with another txid (the retry) can never be mined at all. Such an entry can
+    /// never be submitted (its txid is in no tree) and would be retried at every sync. The POI
+    /// node never saw it: nothing is sent before the txid is validated, so there is nothing to
+    /// clean up remotely. If the transaction does land later, `recover_missing` rebuilds the
+    /// entry from chain data.
+    fn prune_unmined(&mut self, accounts: &[RecoveryAccount]) -> usize {
+        let now = now_secs();
+        let before = self.inner.pending.len();
+        let own_ops: Vec<(Txid, Vec<U256>)> = self
+            .txid_indexer
+            .own_ops()
+            .map(|(txid, op)| (*txid, op.nullifiers.clone()))
+            .collect();
+        self.inner
+            .pending
+            .retain(|entry| !never_mined(entry, accounts, &own_ops, now));
+        before - self.inner.pending.len()
     }
 
     /// Queues a POI proof for every past operation of `accounts` whose outputs
@@ -250,36 +317,11 @@ impl PoiProvider {
     }
 
     fn register(&mut self, op: &ProvedOperation, list_keys: Vec<ListKey>) {
-        let spending_pubkey = op.inner.from.spending_public_key();
-        let txid = Txid::from_operation(op);
-        let in_notes = op.inner.in_notes().to_vec();
-        let out_notes = op.inner.out_notes();
-        let encryptable_notes = op.inner.out_encryptable_notes();
-
         info!(
             "Registered POI for {:?}",
             op.circuit_inputs.bound_params_hash
         );
-        self.inner.pending.push(PendingPoiEntry {
-            txid,
-            spending_pubkey,
-            nullifying_key: op.inner.from.viewing_key().nullifying_key(),
-            utxo_tree_in: op.inner.utxo_tree_number,
-            bound_params_hash: op.circuit_inputs.bound_params_hash,
-            in_notes,
-            out_commitments: out_notes.iter().map(|n| n.hash().into()).collect(),
-            out_npks: encryptable_notes
-                .iter()
-                .map(|n| n.note_public_key())
-                .collect(),
-            out_values: encryptable_notes
-                .iter()
-                .map(|n| U256::from(n.value()))
-                .collect(),
-            token_hash: op.inner.asset.hash(),
-            has_unshield: op.inner.unshield_note().is_some(),
-            list_keys,
-        });
+        self.inner.pending.push(entry_from_op(op, list_keys));
     }
 
     async fn submit_pending(&mut self, prover: &Groth16Prover) {
@@ -411,6 +453,75 @@ impl PoiProvider {
     }
 }
 
+/// Snapshot of a freshly built operation, enough to prove its POI later.
+fn entry_from_op(op: &ProvedOperation, list_keys: Vec<ListKey>) -> PendingPoiEntry {
+    let out_notes = op.inner.out_notes();
+    let encryptable_notes = op.inner.out_encryptable_notes();
+    PendingPoiEntry {
+        txid: Txid::from_operation(op),
+        spending_pubkey: op.inner.from.spending_public_key(),
+        nullifying_key: op.inner.from.viewing_key().nullifying_key(),
+        utxo_tree_in: op.inner.utxo_tree_number,
+        bound_params_hash: op.circuit_inputs.bound_params_hash,
+        in_notes: op.inner.in_notes().to_vec(),
+        out_commitments: out_notes.iter().map(|n| n.hash().into()).collect(),
+        out_npks: encryptable_notes
+            .iter()
+            .map(|n| n.note_public_key())
+            .collect(),
+        out_values: encryptable_notes
+            .iter()
+            .map(|n| U256::from(n.value()))
+            .collect(),
+        token_hash: op.inner.asset.hash(),
+        has_unshield: op.inner.unshield_note().is_some(),
+        list_keys,
+        created_at: now_secs(),
+    }
+}
+
+/// See `PoiProvider::prune_unmined`. `own_ops` are the on-chain operations that
+/// spend a nullifier of ours, as `(txid, nullifiers)`.
+fn never_mined(
+    entry: &PendingPoiEntry,
+    accounts: &[RecoveryAccount],
+    own_ops: &[(Txid, Vec<U256>)],
+    now: u64,
+) -> bool {
+    if now.saturating_sub(entry.created_at) < UNMINED_GRACE_SECS {
+        return false;
+    }
+    // On-chain under this very txid: mined, the proof is due.
+    if own_ops.iter().any(|(txid, _)| *txid == entry.txid) {
+        return false;
+    }
+    // Only judge entries of an account we track: its notes are the evidence.
+    let Some(account) = accounts
+        .iter()
+        .find(|a| a.spending_pubkey == entry.spending_pubkey)
+    else {
+        return false;
+    };
+    // A mined operation nullifies all its inputs: one still unspent means it was not sent.
+    let an_input_is_unspent = entry.in_notes.iter().any(|input| {
+        account
+            .unspent
+            .iter()
+            .any(|n| n.tree_number == input.tree_number && n.leaf_index == input.leaf_index)
+    });
+    if an_input_is_unspent {
+        return true;
+    }
+    // All inputs are spent, but not by this operation: another one took them (typically the
+    // retry after a relayer that did not answer), so this one can never be mined. Requires the
+    // spending operation to be known, otherwise the txid indexer may just be behind.
+    entry.in_notes.iter().any(|input| {
+        own_ops
+            .iter()
+            .any(|(txid, nullifiers)| *txid != entry.txid && nullifiers.contains(&input.nullifier))
+    })
+}
+
 /// Rebuilds the pending entry of `op` if `account` owns every input and every
 /// output is known (received, or sent and decrypted as sender).
 fn recovery_entry(
@@ -474,6 +585,7 @@ fn recovery_entry(
         token_hash,
         has_unshield: op.has_unshield,
         list_keys: list_keys.to_vec(),
+        created_at: now_secs(),
     })
 }
 
@@ -499,4 +611,104 @@ fn blinded_commitments(
         blinded_commitments_out.push(blinded_commitment);
     }
     blinded_commitments_out
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use alloy::primitives::address;
+    use rand::random;
+
+    use super::*;
+    use crate::{
+        account::signer::{PrivateKeySigner, RailgunSigner},
+        caip::AssetId,
+        poi::types::BlindedCommitmentType,
+    };
+
+    #[test]
+    fn an_entry_with_an_unspent_input_was_never_mined() {
+        let signer = PrivateKeySigner::new_evm(random(), random(), 1);
+        let asset = AssetId::erc20(address!("0xDEADDEADDEADDEADDEADDEADDEADDEADDEADDEAD"));
+        let note = |leaf| {
+            UtxoNote::new(
+                0,
+                leaf,
+                signer.clone(),
+                asset,
+                10,
+                random(),
+                "",
+                BlindedCommitmentType::Shield,
+            )
+        };
+        let entry = |created_at| PendingPoiEntry {
+            txid: Txid::new(&[], &[], U256::ZERO),
+            spending_pubkey: signer.spending_public_key(),
+            nullifying_key: signer.viewing_key().nullifying_key(),
+            utxo_tree_in: 0,
+            bound_params_hash: U256::ZERO,
+            in_notes: vec![note(4), note(5)],
+            out_commitments: vec![],
+            out_npks: vec![],
+            out_values: vec![],
+            token_hash: U256::ZERO,
+            has_unshield: false,
+            list_keys: vec![],
+            created_at,
+        };
+        let account = |unspent: Vec<UtxoNote>| RecoveryAccount {
+            spending_pubkey: signer.spending_public_key(),
+            nullifying_key: signer.viewing_key().nullifying_key(),
+            unspent,
+            spent: vec![],
+            sent: vec![],
+        };
+        let now = 10_000_000;
+        let old = now - UNMINED_GRACE_SECS - 1;
+
+        // One input still unspent, long after the proof: never sent.
+        assert!(never_mined(
+            &entry(old),
+            &[account(vec![note(5), note(9)])],
+            &[],
+            now
+        ));
+        // Entries written before the timestamp existed count as old.
+        assert!(never_mined(&entry(0), &[account(vec![note(4)])], &[], now));
+        // Both inputs gone and the spender unknown yet (txid indexer behind): wait.
+        assert!(!never_mined(
+            &entry(old),
+            &[account(vec![note(9)])],
+            &[],
+            now
+        ));
+        // Both inputs gone, spent by this very operation: mined, the proof is due.
+        let e = entry(old);
+        let nullifiers: Vec<U256> = e.in_notes.iter().map(|n| n.nullifier).collect();
+        let mined = vec![(e.txid, nullifiers.clone())];
+        assert!(!never_mined(&e, &[account(vec![note(9)])], &mined, now));
+        // Both inputs gone, spent by another operation (the retry): this one is dead.
+        let retry = vec![(
+            Txid::new(&nullifiers, &[U256::from(1u8)], U256::ZERO),
+            nullifiers,
+        )];
+        assert!(never_mined(&e, &[account(vec![note(9)])], &retry, now));
+        // Just proved, maybe in a relayer's hands: wait.
+        assert!(!never_mined(
+            &entry(now - 60),
+            &[account(vec![note(4), note(5)])],
+            &[],
+            now
+        ));
+        // Not one of our accounts: no evidence, keep.
+        let stranger = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = RecoveryAccount {
+            spending_pubkey: stranger.spending_public_key(),
+            nullifying_key: stranger.viewing_key().nullifying_key(),
+            unspent: vec![note(4)],
+            spent: vec![],
+            sent: vec![],
+        };
+        assert!(!never_mined(&entry(old), &[other], &[], now));
+    }
 }
