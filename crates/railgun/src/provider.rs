@@ -200,6 +200,20 @@ impl RailgunProvider {
         TransactionBuilder::new()
     }
 
+    /// Forgets the pending POI proofs of operations that never reached the chain, for instance
+    /// after the submitter did not answer. Returns how many entries were dropped. Entries of
+    /// operations that are never mined are also dropped automatically during sync, once the
+    /// grace period has passed.
+    pub async fn discard_pending_poi(
+        &mut self,
+        operations: &[ProvedOperation],
+    ) -> Result<usize, RailgunProviderError> {
+        match &mut self.poi_provider {
+            Some(p) => Ok(p.discard_ops(operations).await?),
+            None => Ok(0),
+        }
+    }
+
     /// Build a transaction builder into a proved, signable transaction.
     pub async fn build(
         &mut self,
