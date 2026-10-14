@@ -88,9 +88,7 @@ struct JsonRpcRequest<P: Serialize> {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse<R> {
-    #[allow(dead_code)]
     jsonrpc: String,
-    #[allow(dead_code)]
     id: u64,
     result: Option<R>,
     error: Option<JsonRpcError>,
@@ -303,6 +301,11 @@ async fn call<P: Serialize, R: DeserializeOwned>(
     // info!("Sending JSON-RPC request: {}", req_json);
 
     let resp: JsonRpcResponse<R> = http.post(url).json(&req).send().await?.json().await?;
+    if resp.jsonrpc != "2.0" || resp.id != id {
+        return Err(PoiClientError::UnexpectedResponse(
+            "JSON-RPC version or request id mismatch".to_owned(),
+        ));
+    }
     if let Some(err) = resp.error {
         return Err(PoiClientError::Rpc(err));
     }
@@ -316,3 +319,137 @@ impl std::fmt::Display for JsonRpcError {
 }
 
 impl std::error::Error for JsonRpcError {}
+
+#[cfg(all(test, native))]
+mod response_tests {
+    use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::{Duration, timeout},
+    };
+
+    /// One bounded loopback exchange. No live service, profile or owned data.
+    async fn exchange<R: DeserializeOwned>(
+        method: &'static str,
+        body: serde_json::Value,
+    ) -> Result<R, PoiClientError> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let n = timeout(Duration::from_secs(5), socket.read(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(n > 0 && request.len() + n <= 4096);
+                request.extend_from_slice(&buffer[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        let sent: serde_json::Value =
+                            serde_json::from_slice(&request[end + 4..]).unwrap();
+                        assert_eq!(sent["id"], 1);
+                        assert_eq!(sent["method"], method);
+                        break;
+                    }
+                }
+            }
+            let body = body.to_string();
+            let wire = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(wire.as_bytes()).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let result = call(&AtomicU64::new(1), &client, &url, method, ()).await;
+        server.await.unwrap();
+        result
+    }
+
+    async fn response(
+        body: serde_json::Value,
+    ) -> Result<ValidatedRailgunTxidStatus, PoiClientError> {
+        exchange("ppoi_validated_txid", body).await
+    }
+
+    #[tokio::test]
+    async fn matched_response_is_accepted() {
+        let result = response(
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"validatedTxidIndex": 42}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.index, 42);
+    }
+
+    #[tokio::test]
+    async fn unrelated_response_id_is_refused() {
+        let result = response(
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {"validatedTxidIndex": 42}}),
+        )
+        .await;
+        assert!(matches!(result, Err(PoiClientError::UnexpectedResponse(_))));
+    }
+
+    #[tokio::test]
+    async fn wrong_jsonrpc_version_is_refused() {
+        let result = response(
+            serde_json::json!({"jsonrpc": "1.0", "id": 1, "result": {"validatedTxidIndex": 42}}),
+        )
+        .await;
+        assert!(matches!(result, Err(PoiClientError::UnexpectedResponse(_))));
+    }
+
+    #[tokio::test]
+    async fn matched_rpc_error_is_preserved() {
+        let result = response(serde_json::json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "Invalid params"}})).await;
+        assert!(matches!(
+            result,
+            Err(PoiClientError::Rpc(JsonRpcError { code: -32602, .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unrelated_rpc_error_is_refused() {
+        let result = response(serde_json::json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "Invalid params"}})).await;
+        assert!(matches!(result, Err(PoiClientError::UnexpectedResponse(_))));
+    }
+
+    #[tokio::test]
+    async fn matched_void_submit_response_keeps_null_result_semantics() {
+        let result = exchange::<()>(
+            "ppoi_submit_transact_proof",
+            serde_json::json!({"jsonrpc": "2.0", "id": 1}),
+        )
+        .await;
+        // submit_proof maps this existing outcome to success. This is not a POI
+        // acceptance verdict; owned status must be observed separately.
+        assert!(matches!(result, Err(PoiClientError::NullResult)));
+    }
+
+    #[tokio::test]
+    async fn void_response_is_not_a_validated_txid() {
+        let result = response(serde_json::json!({"jsonrpc": "2.0", "id": 1})).await;
+        assert!(matches!(result, Err(PoiClientError::NullResult)));
+    }
+}
