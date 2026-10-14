@@ -1,6 +1,6 @@
 use std::{fmt::Display, str::FromStr};
 
-use bech32::Hrp;
+use bech32::{Hrp, primitives::decode::UncheckedHrpstring};
 use serde::{self, Deserialize, Serialize};
 use thiserror::Error;
 
@@ -38,6 +38,10 @@ pub enum RailgunAddressError {
     InvalidChainId(u8),
     #[error("Invalid Version: {0}")]
     InvalidVersion(u8),
+    #[error("Invalid payload length: expected 73 bytes, got {0}")]
+    InvalidPayloadLength(usize),
+    #[error("Invalid payload padding: {0}")]
+    InvalidPadding(#[from] bech32::primitives::decode::PaddingError),
     #[error("Hex decoding error: {0}")]
     HexDecode(#[from] hex::FromHexError),
     #[error("Chain ID parsing error: {0}")]
@@ -46,6 +50,7 @@ pub enum RailgunAddressError {
 
 const PREFIX: Hrp = Hrp::parse_unchecked("0zk");
 const ADDRESS_VERSION: u8 = 1;
+const PAYLOAD_LENGTH: usize = 73;
 
 impl RailgunAddress {
     pub fn from_public_keys(
@@ -95,7 +100,7 @@ impl Display for RailgunAddress {
         let network_id_hex = xor_network_id(&self.chain_id.to_string());
         let network_id = hex::decode(network_id_hex).unwrap();
 
-        let mut payload = Vec::with_capacity(73);
+        let mut payload = Vec::with_capacity(PAYLOAD_LENGTH);
         payload.push(ADDRESS_VERSION);
         payload.extend_from_slice(self.master_key.as_bytes());
         payload.extend_from_slice(&network_id);
@@ -110,10 +115,24 @@ impl FromStr for RailgunAddress {
     type Err = RailgunAddressError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (hrp, payload) = bech32::decode(s)?;
+        // The generic decoder also accepts the legacy Bech32 checksum. Railgun
+        // addresses use Bech32m exclusively, as in the published engine.
+        let unchecked = UncheckedHrpstring::new(s).map_err(bech32::DecodeError::Parse)?;
+        unchecked
+            .validate_checksum::<bech32::Bech32m>()
+            .map_err(bech32::DecodeError::Checksum)?;
+        let checked = unchecked.remove_checksum::<bech32::Bech32m>();
+        // byte_iter drops trailing bits; validate them before decoding bytes.
+        checked.validate_segwit_padding()?;
+        let hrp = checked.hrp();
+        let payload: Vec<u8> = checked.byte_iter().collect();
 
         if hrp != PREFIX {
             return Err(RailgunAddressError::InvalidPrefix(hrp.to_string()));
+        }
+
+        if payload.len() != PAYLOAD_LENGTH {
+            return Err(RailgunAddressError::InvalidPayloadLength(payload.len()));
         }
 
         let version = payload[0];
@@ -190,5 +209,57 @@ mod tests {
 
         let address_string = parsed.to_string();
         assert_eq!(address_string, address);
+    }
+
+    #[test]
+    fn test_invalid_payload_lengths_return_errors() {
+        let address = RailgunAddress::from_public_keys(
+            MasterPublicKey::from_bytes([1u8; 32]),
+            ViewingPublicKey::from_bytes([2u8; 32]),
+            ChainId::evm(1),
+        );
+        let (_, payload) = bech32::decode(&address.to_string()).unwrap();
+        for length in 0..payload.len() {
+            let encoded = bech32::encode::<bech32::Bech32m>(PREFIX, &payload[..length]).unwrap();
+            let result = std::panic::catch_unwind(|| encoded.parse::<RailgunAddress>());
+            assert!(result.is_ok(), "payload length {length} must not panic");
+            assert!(
+                result.unwrap().is_err(),
+                "payload length {length} must refuse"
+            );
+        }
+        let mut oversized = payload;
+        oversized.push(0);
+        let encoded = bech32::encode::<bech32::Bech32m>(PREFIX, &oversized).unwrap();
+        assert!(encoded.parse::<RailgunAddress>().is_err());
+        assert!(serde_json::from_value::<RailgunAddress>(serde_json::json!(encoded)).is_err());
+    }
+
+    #[test]
+    fn test_legacy_bech32_checksum_is_refused() {
+        let address = RailgunAddress::from_public_keys(
+            MasterPublicKey::from_bytes([1u8; 32]),
+            ViewingPublicKey::from_bytes([2u8; 32]),
+            ChainId::evm(1),
+        );
+        let (_, payload) = bech32::decode(&address.to_string()).unwrap();
+        let encoded = bech32::encode::<bech32::Bech32>(PREFIX, &payload).unwrap();
+        assert!(encoded.parse::<RailgunAddress>().is_err());
+        assert!(address.to_string().parse::<RailgunAddress>().is_ok());
+    }
+
+    #[test]
+    fn test_noncanonical_padding_is_refused() {
+        // Valid Bech32m checksums, but a nonzero padding bit or an extra group.
+        // The published engine rejects both rather than aliasing one address.
+        for encoded in [
+            "0zk1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszunpd9kxwatwqypqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpq9vapfxp",
+            "0zk1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszunpd9kxwatwqypqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqdnz56e",
+        ] {
+            assert!(matches!(
+                encoded.parse::<RailgunAddress>(),
+                Err(RailgunAddressError::InvalidPadding(_))
+            ));
+        }
     }
 }
