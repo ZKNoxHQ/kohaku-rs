@@ -52,6 +52,52 @@ impl TransactCircuitInputs {
         notes_in: &[UtxoNote],
         notes_out: &[Box<dyn Note>],
     ) -> Result<Self, TransactCircuitInputsError> {
+        Self::build(
+            merkle_tree,
+            bound_params_hash,
+            signer,
+            asset,
+            notes_in,
+            notes_out,
+            true,
+        )
+        .await
+    }
+
+    /// Same public inputs, no spending signature: the signer is never asked to sign.
+    ///
+    /// For dummy-proof transactions only (gas estimation). With a hardware or threshold signer
+    /// every signature is a user confirmation or a signing ceremony, and an estimate must not
+    /// cost one. The result cannot be proved: the circuit checks the signature.
+    pub async fn from_inputs_unsigned(
+        merkle_tree: &UtxoMerkleTree,
+        bound_params_hash: U256,
+        signer: Arc<dyn RailgunSigner>,
+        asset: AssetId,
+        notes_in: &[UtxoNote],
+        notes_out: &[Box<dyn Note>],
+    ) -> Result<Self, TransactCircuitInputsError> {
+        Self::build(
+            merkle_tree,
+            bound_params_hash,
+            signer,
+            asset,
+            notes_in,
+            notes_out,
+            false,
+        )
+        .await
+    }
+
+    async fn build(
+        merkle_tree: &UtxoMerkleTree,
+        bound_params_hash: U256,
+        signer: Arc<dyn RailgunSigner>,
+        asset: AssetId,
+        notes_in: &[UtxoNote],
+        notes_out: &[Box<dyn Note>],
+        sign: bool,
+    ) -> Result<Self, TransactCircuitInputsError> {
         if notes_in.is_empty() || notes_out.is_empty() {
             return Err(TransactCircuitInputsError::EmptyInputNotes);
         }
@@ -73,8 +119,12 @@ impl TransactCircuitInputs {
         unsigned.extend_from_slice(&nullifiers);
         unsigned.extend_from_slice(&commitments);
         let unsigned_hash = poseidon_hash(&unsigned).unwrap();
-        let signature = signer.sign(unsigned_hash).await?;
-        let signature = [signature.r8_x, signature.r8_y, signature.s];
+        let signature = if sign {
+            let signature = signer.sign(unsigned_hash).await?;
+            [signature.r8_x, signature.r8_y, signature.s]
+        } else {
+            [U256::ZERO; 3]
+        };
 
         let random_in = notes_in
             .iter()
