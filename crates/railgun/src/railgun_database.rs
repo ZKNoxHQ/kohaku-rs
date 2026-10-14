@@ -53,16 +53,10 @@ pub trait RailgunDB: crate::common::MaybeSend {
         state: MerkleTreeState,
     ) -> Result<(), DatabaseError>;
     async fn get_txid_indexer(&self) -> Result<TxidIndexerState, DatabaseError>;
-    async fn set_txid_indexer(&self, state: &TxidIndexerState) -> Result<(), DatabaseError>;
     async fn get_txid_tree(
         &self,
         tree_number: u32,
     ) -> Result<Option<MerkleTreeState>, DatabaseError>;
-    async fn set_txid_tree(
-        &self,
-        tree_number: u32,
-        state: MerkleTreeState,
-    ) -> Result<(), DatabaseError>;
     async fn get_poi_provider(&self) -> Result<PoiProviderState, DatabaseError>;
     async fn set_poi_provider(&self, state: &PoiProviderState) -> Result<(), DatabaseError>;
 }
@@ -133,10 +127,6 @@ impl RailgunDB for Store {
         deserialize_envelope(&bytes, 1)
     }
 
-    async fn set_txid_indexer(&self, state: &TxidIndexerState) -> Result<(), DatabaseError> {
-        write_envelope(self, &txid_indexer_key(), 1, state).await
-    }
-
     async fn get_txid_tree(
         &self,
         tree_number: u32,
@@ -147,15 +137,6 @@ impl RailgunDB for Store {
         };
 
         deserialize_envelope(&bytes, 1).map(Some)
-    }
-
-    async fn set_txid_tree(
-        &self,
-        tree_number: u32,
-        state: MerkleTreeState,
-    ) -> Result<(), DatabaseError> {
-        write_envelope(self, &txid_tree_key(tree_number), 1, &state)
-            .await
     }
 
     async fn get_poi_provider(&self) -> Result<PoiProviderState, DatabaseError> {
@@ -180,6 +161,23 @@ async fn write_envelope<S: Serialize>(
 ) -> Result<(), DatabaseError> {
     let bytes = serialize_envelope(version, data)?;
     store.put(key, &bytes).await?;
+    Ok(())
+}
+
+/// Position maps and trees describe one TXID snapshot. Writing trees first can
+/// leave extra leaves with no position mappings if the final checkpoint write
+/// fails. The store's atomic batch commits all existing version-1 envelopes together.
+pub(crate) async fn write_txid_snapshot(
+    store: &Store,
+    state: &TxidIndexerState,
+    trees: &[(u32, MerkleTreeState)],
+) -> Result<(), DatabaseError> {
+    let mut writes = Vec::with_capacity(trees.len() + 1);
+    for (number, tree) in trees {
+        writes.push((txid_tree_key(*number), serialize_envelope(1, tree)?));
+    }
+    writes.push((txid_indexer_key(), serialize_envelope(1, state)?));
+    store.put_batch(writes).await?;
     Ok(())
 }
 
