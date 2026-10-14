@@ -17,6 +17,9 @@ pub mod provider;
 mod railgun_database;
 pub mod transact;
 
+#[cfg(all(test, native))]
+mod interop_tests;
+
 pub use common::MaybeSend;
 
 #[cfg(all(wasm, parallel))]
