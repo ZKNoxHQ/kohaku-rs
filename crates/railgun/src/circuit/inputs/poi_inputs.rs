@@ -23,8 +23,7 @@ pub struct PoiCircuitInputs {
     // Public Inputs
     /// The pre-inclusion Merkle root of the txid
     pub railgun_txid_merkleroot_after_transaction: MerkleRoot,
-    /// POI Merkle roots from the blinded commitment proofs, from
-    /// `poi_client::merkle_proofs`. A seperate padded version is
+    /// POI Merkle roots from the local list copy. A seperate padded version is
     /// kept for circuit inputs.
     pub poi_merkleroots: Vec<MerkleRoot>,
     poi_merkleroots_padded: Vec<MerkleRoot>,

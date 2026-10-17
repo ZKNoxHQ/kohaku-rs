@@ -7,15 +7,15 @@ use std::{
 };
 
 use alloy::primitives::ChainId;
+use ruint::aliases::U256;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use crate::{
-    merkle_tree::{MerkleProof, MerkleRoot, MerkleTreeVerifier},
+    merkle_tree::{MerkleRoot, MerkleTreeVerifier},
     poi::types::{
-        BlindedCommitment, BlindedCommitmentData, BlindedCommitmentType, ChainParams,
-        GetMerkleProofsParams, GetPoisPerListParams, ListKey, PoiStatus, PoisPerListMap,
-        SubmitTransactProofParams, TransactProofData, TxidVersion, ValidateTxidMerklerootParams,
+        ChainParams, GetPoiMerkletreeLeavesParams, ListKey, SubmitTransactProofParams,
+        TransactProofData, TxidVersion, ValidatePoiMerklerootsParams, ValidateTxidMerklerootParams,
         ValidatedRailgunTxidStatus,
     },
 };
@@ -24,17 +24,20 @@ use crate::{
 #[cfg_attr(wasm, async_trait::async_trait(?Send))]
 pub trait PoiNodeClient {
     fn list_keys(&self) -> Vec<ListKey>;
-    async fn poi_status(
+    /// Leaves `[start_index, end_index)` of a POI list. The request names a range,
+    /// not a blinded commitment.
+    async fn merkletree_leaves(
         &self,
         list_key: &ListKey,
-        blinded_commitment: BlindedCommitment,
-        commitment_type: BlindedCommitmentType,
-    ) -> Result<PoiStatus, PoiClientError>;
-    async fn merkle_proof(
+        start_index: u64,
+        end_index: u64,
+    ) -> Result<Vec<U256>, PoiClientError>;
+    /// Whether every root has been published for this list. No commitments.
+    async fn validate_poi_merkleroots(
         &self,
         list_key: &ListKey,
-        blinded_commitment: BlindedCommitment,
-    ) -> Result<MerkleProof, PoiClientError>;
+        roots: &[MerkleRoot],
+    ) -> Result<bool, PoiClientError>;
     async fn submit_proof(
         &self,
         proof_data: HashMap<ListKey, TransactProofData>,
@@ -72,10 +75,6 @@ pub enum PoiClientError {
     NullResult,
     #[error("Unexpected response: {0}")]
     UnexpectedResponse(String),
-    #[error("Invalid POI Merkle root for list key {0:?}: {1}")]
-    InvalidPoiMerkleRoot(ListKey, MerkleRoot),
-    #[error("Proof not found for blinded commitment {1:?} and list key {0:?}")]
-    ProofNotFound(ListKey, BlindedCommitment),
 }
 
 #[derive(Debug, Serialize)]
@@ -104,7 +103,7 @@ pub struct JsonRpcError {
 impl PoiClient {
     pub fn new(chain: ChainId, url: impl Into<String>, list_keys: Vec<ListKey>) -> Self {
         let next_id = AtomicU64::new(1);
-        let http = reqwest::Client::new();
+        let http = poi_http_client();
         let url = url.into();
 
         Self {
@@ -127,6 +126,22 @@ impl PoiClient {
     }
 }
 
+/// A hung node must return so the list sync can spend its retries.
+/// The browser client has no equivalent reqwest timeout.
+fn poi_http_client() -> reqwest::Client {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("POI HTTP client accepts a timeout")
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        reqwest::Client::new()
+    }
+}
+
 #[cfg_attr(native, async_trait::async_trait)]
 #[cfg_attr(wasm, async_trait::async_trait(?Send))]
 impl PoiNodeClient for PoiClient {
@@ -134,66 +149,41 @@ impl PoiNodeClient for PoiClient {
         self.list_keys.clone()
     }
 
-    /// Returns the POI status for a given list key and blinded commitment.
-    ///  
-    /// NOTE: Fetches a single status rather than batching many blinded commitments
-    /// because I don't know how the POI node handles partial failures in a batch.
-    async fn poi_status(
+    async fn merkletree_leaves(
         &self,
         list_key: &ListKey,
-        blinded_commitment: BlindedCommitment,
-        commitment_type: BlindedCommitmentType,
-    ) -> Result<PoiStatus, PoiClientError> {
-        let mut pois_per_list: PoisPerListMap = self
+        start_index: u64,
+        end_index: u64,
+    ) -> Result<Vec<U256>, PoiClientError> {
+        let leaves: Vec<String> = self
             .call(
-                "ppoi_pois_per_list",
-                GetPoisPerListParams {
-                    chain: self.chain(),
-                    list_keys: vec![list_key.clone()],
-                    blinded_commitment_datas: vec![BlindedCommitmentData {
-                        blinded_commitment,
-                        commitment_type,
-                    }],
-                },
-            )
-            .await?;
-
-        let mut list_key_map = pois_per_list
-            .remove(&blinded_commitment)
-            .ok_or_else(|| PoiClientError::ProofNotFound(list_key.clone(), blinded_commitment))?;
-
-        let poi_status = list_key_map
-            .remove(list_key)
-            .ok_or_else(|| PoiClientError::ProofNotFound(list_key.clone(), blinded_commitment))?;
-        Ok(poi_status.into())
-    }
-
-    /// Returns the Merkle proof for a given list key and blinded commitment.
-    ///
-    /// NOTE: Fetches a single proof rather than batching many blinded commitments
-    /// because I don't know how the POI node handles partial failures in a batch.
-    async fn merkle_proof(
-        &self,
-        list_key: &ListKey,
-        blinded_commitment: BlindedCommitment,
-    ) -> Result<MerkleProof, PoiClientError> {
-        let proofs: Vec<MerkleProof> = self
-            .call(
-                "ppoi_merkle_proofs",
-                GetMerkleProofsParams {
+                "ppoi_poi_merkletree_leaves",
+                GetPoiMerkletreeLeavesParams {
                     chain: self.chain(),
                     list_key: list_key.clone(),
-                    blinded_commitments: vec![blinded_commitment],
+                    start_index,
+                    end_index,
                 },
             )
             .await?;
 
-        let proof = proofs
-            .into_iter()
-            .next()
-            .ok_or_else(|| PoiClientError::ProofNotFound(list_key.clone(), blinded_commitment))?;
+        leaves.iter().map(|leaf| parse_leaf(leaf)).collect()
+    }
 
-        Ok(proof)
+    async fn validate_poi_merkleroots(
+        &self,
+        list_key: &ListKey,
+        roots: &[MerkleRoot],
+    ) -> Result<bool, PoiClientError> {
+        self.call(
+            "ppoi_validate_poi_merkleroots",
+            ValidatePoiMerklerootsParams {
+                chain: self.chain(),
+                list_key: list_key.clone(),
+                poi_merkleroots: roots.to_vec(),
+            },
+        )
+        .await
     }
 
     /// Submits a proved transaction to the POI node.
@@ -310,6 +300,12 @@ async fn call<P: Serialize, R: DeserializeOwned>(
         return Err(PoiClientError::Rpc(err));
     }
     resp.result.ok_or(PoiClientError::NullResult)
+}
+
+fn parse_leaf(leaf: &str) -> Result<U256, PoiClientError> {
+    let hex = leaf.strip_prefix("0x").unwrap_or(leaf);
+    U256::from_str_radix(hex, 16)
+        .map_err(|_| PoiClientError::UnexpectedResponse(format!("POI leaf {leaf}")))
 }
 
 impl std::fmt::Display for JsonRpcError {

@@ -1,6 +1,5 @@
 #![doc = include_str!("../README.md")]
 
-mod common;
 mod abis;
 pub mod account;
 mod adapter_data;
@@ -8,6 +7,7 @@ pub mod builder;
 pub mod caip;
 pub mod chain_config;
 mod circuit;
+mod common;
 pub mod crypto;
 pub mod indexer;
 mod merkle_tree;

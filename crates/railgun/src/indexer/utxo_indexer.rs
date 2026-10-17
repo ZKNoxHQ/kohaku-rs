@@ -341,7 +341,11 @@ mod tests {
         }
 
         async fn sync(&self, from: u64, to: u64) -> Result<Vec<SyncEvent>, SyncerError> {
-            let leaf = LegacyCommitment { hash: U256::from(1), tree_number: 0, leaf_index: 0 };
+            let leaf = LegacyCommitment {
+                hash: U256::from(1),
+                tree_number: 0,
+                leaf_index: 0,
+            };
             Ok(if (from..=to).contains(&5) {
                 vec![SyncEvent::Legacy(leaf, 5)]
             } else {
@@ -375,7 +379,10 @@ mod tests {
 
     impl Faulty {
         fn new() -> Self {
-            Self { inner: Arc::new(MemoryStore::new()), fail_on: Arc::new(Mutex::new(None)) }
+            Self {
+                inner: Arc::new(MemoryStore::new()),
+                fail_on: Arc::new(Mutex::new(None)),
+            }
         }
     }
 
@@ -388,9 +395,9 @@ mod tests {
         async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
             if let Some(key) = self.fail_on.lock().unwrap().as_deref() {
                 if items.iter().any(|(k, _)| *k == key) {
-                    return Err(StoreError::from(Box::<dyn std::error::Error + Send + Sync>::from(
-                        "simulated interruption",
-                    )));
+                    return Err(StoreError::from(
+                        Box::<dyn std::error::Error + Send + Sync>::from("simulated interruption"),
+                    ));
                 }
             }
             self.inner.put_batch(items).await
@@ -412,8 +419,15 @@ mod tests {
         .unwrap();
 
         let err = indexer.sync_to(10).await.unwrap_err();
-        assert!(err.to_string().contains("root the chain never had"), "got: {err}");
-        assert_eq!(indexer.synced_block(), 0, "a rejected tree must not advance the sync");
+        assert!(
+            err.to_string().contains("root the chain never had"),
+            "got: {err}"
+        );
+        assert_eq!(
+            indexer.synced_block(),
+            0,
+            "a rejected tree must not advance the sync"
+        );
     }
 
     #[tokio::test]
@@ -421,19 +435,32 @@ mod tests {
         let backend = Faulty::new();
         *backend.fail_on.lock().unwrap() = Some(b"utxo_tree:0".to_vec());
 
-        let mut indexer =
-            UtxoIndexer::new(Store::new(backend.clone()), Arc::new(OneLeaf), Arc::new(Verifier(true)))
-                .await
-                .unwrap();
-        assert!(indexer.sync_to(10).await.is_err(), "the tree write was made to fail");
+        let mut indexer = UtxoIndexer::new(
+            Store::new(backend.clone()),
+            Arc::new(OneLeaf),
+            Arc::new(Verifier(true)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            indexer.sync_to(10).await.is_err(),
+            "the tree write was made to fail"
+        );
 
         // Next run: the saved synced block must not be ahead of the saved tree.
         *backend.fail_on.lock().unwrap() = None;
-        let mut reloaded =
-            UtxoIndexer::new(Store::new(backend.clone()), Arc::new(OneLeaf), Arc::new(Verifier(true)))
-                .await
-                .unwrap();
-        assert_eq!(reloaded.synced_block(), 0, "blocks claimed whose leaves were never saved");
+        let mut reloaded = UtxoIndexer::new(
+            Store::new(backend.clone()),
+            Arc::new(OneLeaf),
+            Arc::new(Verifier(true)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reloaded.synced_block(),
+            0,
+            "blocks claimed whose leaves were never saved"
+        );
 
         // And it recovers: the leaf is fetched again.
         reloaded.sync_to(10).await.unwrap();

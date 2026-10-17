@@ -280,11 +280,8 @@ impl TxidIndexer {
 mod snapshot_tests {
     use super::*;
     use crate::{
-        merkle_tree::{MerkleProof, MerkleRoot},
-        poi::types::{
-            BlindedCommitment, BlindedCommitmentType, ListKey, PoiStatus, TransactProofData,
-            ValidatedRailgunTxidStatus,
-        },
+        merkle_tree::MerkleRoot,
+        poi::types::{ListKey, TransactProofData, ValidatedRailgunTxidStatus},
     };
     use kohaku_kv_store::{
         backend::{KvStoreBackend, StoreError},
@@ -379,20 +376,20 @@ mod snapshot_tests {
         fn list_keys(&self) -> Vec<ListKey> {
             vec![]
         }
-        async fn poi_status(
+        async fn merkletree_leaves(
             &self,
             _: &ListKey,
-            _: BlindedCommitment,
-            _: BlindedCommitmentType,
-        ) -> Result<PoiStatus, PoiClientError> {
-            panic!("no owned reads")
+            _: u64,
+            _: u64,
+        ) -> Result<Vec<U256>, PoiClientError> {
+            panic!("no list reads")
         }
-        async fn merkle_proof(
+        async fn validate_poi_merkleroots(
             &self,
             _: &ListKey,
-            _: BlindedCommitment,
-        ) -> Result<MerkleProof, PoiClientError> {
-            panic!("no membership reads")
+            _: &[MerkleRoot],
+        ) -> Result<bool, PoiClientError> {
+            panic!("no list reads")
         }
         async fn submit_proof(
             &self,

@@ -20,14 +20,14 @@ use kohaku_railgun::{
     indexer::syncer::{ChainedSyncer, RpcSyncer, SubsquidSyncer},
     transact::TransactionBuilder,
 };
-use tokio::time::sleep;
-use tracing::info;
-use tracing_subscriber::EnvFilter;
 use kohaku_userop_kit::{
     bundler::{Bundler, pimlico::PimlicoBundler},
     entry_point::ENTRY_POINT_08,
     smart_account::simple_smart_account::{self, SimpleSmartAccount},
 };
+use tokio::time::sleep;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 sol! {
     #[sol(rpc)]
@@ -74,8 +74,11 @@ async fn test_broadcast_utxo() -> Result<(), anyhow::Error> {
     let spending_key = SpendingKey::from_hex(&spending_key)?;
     let viewing_key = std::env::var("DEV_VIEWING_KEY").expect("DEV_VIEWING_KEY must be set");
     let viewing_key = ViewingKey::from_hex(&viewing_key)?;
-    let railgun_signer =
-        kohaku_railgun::account::signer::PrivateKeySigner::new_evm(spending_key, viewing_key, chain.id);
+    let railgun_signer = kohaku_railgun::account::signer::PrivateKeySigner::new_evm(
+        spending_key,
+        viewing_key,
+        chain.id,
+    );
 
     info!("Setting up alto");
     let pimlico_url = format!("https://public.pimlico.io/v2/{}/rpc", chain.id);
@@ -121,8 +124,11 @@ async fn test_broadcast_utxo() -> Result<(), anyhow::Error> {
     let weth_contract = WETH::new(chain.wrapped_base_token, provider.clone());
 
     let smart_account_signer = alloy::signers::local::PrivateKeySigner::random();
-    let smart_account =
-        SimpleSmartAccount::new(smart_account_signer.address(), chain.id, Arc::new(provider.clone()));
+    let smart_account = SimpleSmartAccount::new(
+        smart_account_signer.address(),
+        chain.id,
+        Arc::new(provider.clone()),
+    );
 
     info!("Testing unshielding");
     let tx = TransactionBuilder::new().unshield(

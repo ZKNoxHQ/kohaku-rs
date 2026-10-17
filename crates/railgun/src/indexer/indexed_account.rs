@@ -198,7 +198,14 @@ mod tests {
 
         // A note of a third party is neither received nor sent.
         let third = PrivateKeySigner::new_evm(random(), random(), 1);
-        let foreign = TransferNote::new(third.viewing_key(), recipient.address(), asset, 1, random(), "");
+        let foreign = TransferNote::new(
+            third.viewing_key(),
+            recipient.address(),
+            asset,
+            1,
+            random(),
+            "",
+        );
         let ct = foreign.encrypt(rng).unwrap();
         account
             .handle_transact_event(&syncer::Transact {
@@ -214,7 +221,14 @@ mod tests {
         assert_eq!(account.sent().len(), 1);
 
         // Change note to self, then spent: moves to `spent`.
-        let change = TransferNote::new(sender.viewing_key(), sender.address(), asset, 5, random(), "");
+        let change = TransferNote::new(
+            sender.viewing_key(),
+            sender.address(),
+            asset,
+            5,
+            random(),
+            "",
+        );
         let ct = change.encrypt(rng).unwrap();
         account
             .handle_transact_event(&syncer::Transact {
