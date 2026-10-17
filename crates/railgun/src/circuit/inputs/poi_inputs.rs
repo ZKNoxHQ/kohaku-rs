@@ -83,6 +83,20 @@ fn circuit_size(nullifiers_len: usize, commitments_len: usize) -> usize {
     }
 }
 
+#[cfg(all(test, native))]
+mod circuit_selection_tests {
+    use super::circuit_size;
+
+    #[test]
+    fn the_unshield_commitment_counts_toward_the_full_circuit_boundary() {
+        // Three private outputs plus an unshield have four commitments, even
+        // though only three blinded private commitments appear in the POST.
+        assert_eq!(circuit_size(1, 4), 13);
+        assert_eq!(circuit_size(3, 3), 3);
+        assert_eq!(circuit_size(4, 1), 13);
+    }
+}
+
 /// Pads a vector with the railgun merkle tree zero value.
 fn pad_with_zero_value<T>(vec: Vec<T>, target_len: usize) -> Vec<T>
 where
