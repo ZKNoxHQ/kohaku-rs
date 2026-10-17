@@ -183,24 +183,71 @@ impl RailgunProvider {
         Ok(())
     }
 
-    /// Syncs the provider to the latest block.
+    /// Syncs the provider to the latest block and processes pending POI proofs.
+    /// With POI enabled, this may generate and submit proofs to the POI service.
+    ///
+    /// # Errors
+    /// Returns synchronization or persistence errors. Individual POI processing
+    /// failures retain the existing best-effort behavior.
     pub async fn sync(&mut self) -> Result<(), RailgunProviderError> {
         self.sync_to(u64::MAX).await
     }
 
-    /// Syncs the provider to the specified block.
+    /// Syncs the provider to the specified block and processes pending POI proofs.
+    /// Use [`Self::sync_to_without_poi_submission`] to defer proof submission.
+    ///
+    /// # Errors
+    /// Returns synchronization or persistence errors. Individual POI processing
+    /// failures retain the existing best-effort behavior.
     pub async fn sync_to(&mut self, to_block: u64) -> Result<(), RailgunProviderError> {
+        self.sync_to_without_poi_submission(to_block).await?;
+        self.process_pending_poi().await
+    }
+
+    /// Syncs to the latest block without generating or submitting POI proofs.
+    /// This still performs indexer, root and owned POI status reads.
+    ///
+    /// # Errors
+    /// Returns an error if synchronization, validation or persistence fails.
+    pub async fn sync_without_poi_submission(&mut self) -> Result<(), RailgunProviderError> {
+        self.sync_to_without_poi_submission(u64::MAX).await
+    }
+
+    /// Syncs to the specified block without generating or submitting POI proofs.
+    /// Pending POI work is retained for [`Self::process_pending_poi`]. This is
+    /// not a no-disclosure scan: owned POI status and root reads can occur.
+    ///
+    /// # Errors
+    /// Returns an error if synchronization, validation or persistence fails.
+    pub async fn sync_to_without_poi_submission(
+        &mut self,
+        to_block: u64,
+    ) -> Result<(), RailgunProviderError> {
         self.utxo_indexer.sync_to(to_block).await?;
 
         if let Some(poi_provider) = &mut self.poi_provider {
             // The account history lets the POI provider rebuild proofs for
             // operations it did not build itself.
             let accounts = self.utxo_indexer.recovery_accounts();
-            poi_provider
-                .sync_to(&self.prover, to_block, &accounts)
-                .await?;
+            poi_provider.sync_to(to_block, &accounts).await?;
         }
 
+        Ok(())
+    }
+
+    /// Explicitly generates and submits pending POI proofs when POI is enabled.
+    /// Processing is best effort: individual proof/service failures remain
+    /// queued and are logged; `Ok` is not proof acceptance. Observe owned POI
+    /// status separately before spending. This processes the whole queue and
+    /// provides no per-proof review or durable send-attempt journal.
+    ///
+    /// # Errors
+    /// Returns an error if queue persistence fails. Individual processing errors
+    /// are logged and their entries remain pending.
+    pub async fn process_pending_poi(&mut self) -> Result<(), RailgunProviderError> {
+        if let Some(poi_provider) = &mut self.poi_provider {
+            poi_provider.process_pending(&self.prover).await?;
+        }
         Ok(())
     }
 
