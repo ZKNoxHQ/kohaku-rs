@@ -42,6 +42,30 @@ pub enum PoiStatus {
     ProofSubmitted,
     Missing,
     ShieldBlocked,
+    /// Local observation failure, not a status reported by a POI node.
+    /// Does not establish absence and must not authorize proof submission.
+    Unavailable,
+}
+
+// The node reports only protocol statuses. Keep local observation failures out
+// of its wire vocabulary while allowing public/cached statuses to round-trip.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub(crate) enum PoiNodeStatus {
+    Valid,
+    ProofSubmitted,
+    Missing,
+    ShieldBlocked,
+}
+
+impl From<PoiNodeStatus> for PoiStatus {
+    fn from(value: PoiNodeStatus) -> Self {
+        match value {
+            PoiNodeStatus::Valid => Self::Valid,
+            PoiNodeStatus::ProofSubmitted => Self::ProofSubmitted,
+            PoiNodeStatus::Missing => Self::Missing,
+            PoiNodeStatus::ShieldBlocked => Self::ShieldBlocked,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +119,7 @@ pub struct ValidateTxidMerklerootParams {
     pub merkleroot: MerkleRoot,
 }
 
-pub type PoisPerListMap = HashMap<BlindedCommitment, HashMap<ListKey, PoiStatus>>;
+pub type PoisPerListMap = HashMap<BlindedCommitment, HashMap<ListKey, PoiNodeStatus>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +218,7 @@ impl Display for PoiStatus {
             PoiStatus::ShieldBlocked => "ShieldBlocked",
             PoiStatus::ProofSubmitted => "ProofSubmitted",
             PoiStatus::Missing => "Missing",
+            PoiStatus::Unavailable => "Unavailable",
         };
         write!(f, "{}", s)
     }
@@ -208,6 +233,7 @@ impl FromStr for PoiStatus {
             "shieldblocked" => Ok(PoiStatus::ShieldBlocked),
             "proofsubmitted" => Ok(PoiStatus::ProofSubmitted),
             "missing" => Ok(PoiStatus::Missing),
+            "unavailable" => Ok(PoiStatus::Unavailable),
             _ => Err(()),
         }
     }
