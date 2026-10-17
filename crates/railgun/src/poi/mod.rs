@@ -1,4 +1,5 @@
 pub(crate) mod client;
+mod lists;
 pub(crate) mod note;
 pub(crate) mod provider;
 pub(crate) mod recovery;

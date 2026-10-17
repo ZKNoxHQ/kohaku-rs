@@ -1,5 +1,5 @@
-use kohaku_crypto::poseidon_hash;
 use curve25519_dalek::{Scalar, edwards::CompressedEdwardsY};
+use kohaku_crypto::poseidon_hash;
 use rand::{CryptoRng, RngExt};
 use ruint::{Uint, aliases::U256};
 use sha2::{Digest, Sha512};

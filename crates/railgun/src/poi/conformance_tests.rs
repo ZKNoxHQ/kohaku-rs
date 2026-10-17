@@ -25,10 +25,7 @@ use tokio::{
 
 use super::{
     client::{PoiClient, PoiClientError, PoiNodeClient},
-    types::{
-        BlindedCommitment, BlindedCommitmentType, ListKey, PoiStatus, SubmitTransactProofParams,
-        TransactProofData,
-    },
+    types::{BlindedCommitment, ListKey, SubmitTransactProofParams, TransactProofData},
 };
 use crate::{
     crypto::railgun_txid::Txid,
@@ -450,27 +447,6 @@ impl Service {
                                     json!({"code": -32602, "message": "Invalid proof"});
                             }
                         }
-                        "ppoi_pois_per_list" => {
-                            let mut statuses = serde_json::Map::new();
-                            for note in request["params"]["blindedCommitmentDatas"]
-                                .as_array()
-                                .unwrap()
-                            {
-                                let commitment: BlindedCommitment =
-                                    serde_json::from_value(note["blindedCommitment"].clone())
-                                        .unwrap();
-                                let status = if state.accepted.contains(&commitment) {
-                                    PoiStatus::Valid
-                                } else {
-                                    PoiStatus::Missing
-                                };
-                                statuses.insert(
-                                    note["blindedCommitment"].as_str().unwrap().to_owned(),
-                                    json!({LIST: status}),
-                                );
-                            }
-                            response["result"] = Value::Object(statuses);
-                        }
                         "ppoi_validated_txid" => {
                             response["result"] = json!({"validatedTxidIndex": state.latest_index});
                         }
@@ -544,29 +520,14 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Value {
     }
 }
 
-async fn status(client: &PoiClient, data: &TransactProofData) -> PoiStatus {
-    timeout(
-        Duration::from_secs(5),
-        client.poi_status(
-            &LIST.into(),
-            data.blinded_commitments_out[0],
-            BlindedCommitmentType::Transact,
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-}
-
 #[tokio::test]
 async fn real_client_submits_current_proofs_and_retired_proofs_stay_missing() {
     let service = Service::new().await;
     let client = service.client();
     let retired = fixture("retired-3x3").proof_data;
-    assert_eq!(status(&client, &retired).await, PoiStatus::Missing);
     let refused = timeout(
         Duration::from_secs(5),
-        client.submit_proof([(LIST.into(), retired.clone())].into()),
+        client.submit_proof([(LIST.into(), retired)].into()),
     )
     .await
     .unwrap();
@@ -574,41 +535,48 @@ async fn real_client_submits_current_proofs_and_retired_proofs_stay_missing() {
         matches!(refused, Err(PoiClientError::Rpc(error)) if error.code == -32602 && error.message == "Invalid proof")
     );
     assert!(service.state.lock().unwrap().accepted.is_empty());
-    assert_eq!(status(&client, &retired).await, PoiStatus::Missing);
     for name in ["current-3x3", "current-13x13-unshield"] {
         let current = fixture(name).proof_data;
+        let output = current.blinded_commitments_out[0];
         timeout(
             Duration::from_secs(5),
-            client.submit_proof([(LIST.into(), current.clone())].into()),
+            client.submit_proof([(LIST.into(), current)].into()),
         )
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(status(&client, &current).await, PoiStatus::Valid);
+        assert!(service.state.lock().unwrap().accepted.contains(&output));
     }
+    assert_eq!(
+        *service.state.lock().unwrap().methods,
+        vec![
+            "ppoi_submit_transact_proof",
+            "ppoi_submit_transact_proof",
+            "ppoi_submit_transact_proof",
+        ]
+    );
     service.close().await;
 }
 
 #[tokio::test]
-async fn lost_submit_response_is_resolved_by_status_not_another_post() {
+async fn lost_submit_response_is_not_followed_by_another_post() {
     let service = Service::new().await;
     service.state.lock().unwrap().drop_next_submit = true;
     let data = fixture("current-3x3").proof_data;
+    let output = data.blinded_commitments_out[0];
     let result = timeout(
         Duration::from_secs(5),
-        service
-            .client()
-            .submit_proof([(LIST.into(), data.clone())].into()),
+        service.client().submit_proof([(LIST.into(), data)].into()),
     )
     .await
     .unwrap();
     assert!(matches!(result, Err(PoiClientError::Http(_))));
-    // Recreate the client as on reopen. The POST was accepted despite the lost reply.
-    assert_eq!(status(&service.client(), &data).await, PoiStatus::Valid);
-    assert_eq!(
-        *service.state.lock().unwrap().methods,
-        vec!["ppoi_submit_transact_proof", "ppoi_pois_per_list"]
-    );
+    // The node accepted the proof. The client does not retry the POST and does
+    // not ask about this commitment; the local list copy is how that shows up.
+    let state = service.state.lock().unwrap();
+    assert!(state.accepted.contains(&output));
+    assert_eq!(*state.methods, vec!["ppoi_submit_transact_proof"]);
+    drop(state);
     service.close().await;
 }
 

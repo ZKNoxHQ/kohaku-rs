@@ -56,11 +56,12 @@ impl RailgunBuilder {
         self
     }
 
-    /// Enables POI (Proof of innocence) support for the provider.
+    /// Enables POI support.
     ///
-    /// Uses the default chain-specific POI endpoints and list keys from the chain config. Enabling
-    /// this tells the builder to submit POI proofs when spending notes and to only spend
-    /// notes that have been marked as `spendable` by the POI provider.
+    /// Uses the chain's POI endpoint and list keys. Spending selects only notes
+    /// whose local status is `Valid`. [`RailgunProvider::sync`] and
+    /// [`RailgunProvider::sync_to`] copy the list, then
+    /// [`RailgunProvider::process_pending_poi`] submits proofs.
     #[must_use]
     pub fn with_poi(mut self) -> Self {
         self.poi = true;

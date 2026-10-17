@@ -2,7 +2,7 @@
 //!
 //! <https://github.com/Railgun-Community/private-proof-of-innocence/blob/4b1eaf6ef19099dbfd6b43b1ca78d2ce0132a752/packages/node/src/api/README.md>
 
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,7 @@ pub enum PoiStatus {
 
 // The node reports only protocol statuses. Keep local observation failures out
 // of its wire vocabulary while allowing public/cached statuses to round-trip.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub(crate) enum PoiNodeStatus {
     Valid,
@@ -57,6 +58,7 @@ pub(crate) enum PoiNodeStatus {
     ShieldBlocked,
 }
 
+#[cfg(test)]
 impl From<PoiNodeStatus> for PoiStatus {
     fn from(value: PoiNodeStatus) -> Self {
         match value {
@@ -77,30 +79,26 @@ pub struct ChainParams {
     pub txid_version: TxidVersion,
 }
 
+/// Range of POI list leaves. `end_index` is exclusive. The node returns at most
+/// 100 leaves and pads past the end of the list with the POI zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GetPoisPerListParams {
-    #[serde(flatten)]
-    pub chain: ChainParams,
-    pub list_keys: Vec<ListKey>,
-    pub blinded_commitment_datas: Vec<BlindedCommitmentData>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlindedCommitmentData {
-    #[serde(rename = "type")]
-    pub commitment_type: BlindedCommitmentType,
-    pub blinded_commitment: BlindedCommitment,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetMerkleProofsParams {
+pub struct GetPoiMerkletreeLeavesParams {
     #[serde(flatten)]
     pub chain: ChainParams,
     pub list_key: ListKey,
-    pub blinded_commitments: Vec<BlindedCommitment>,
+    pub start_index: u64,
+    pub end_index: u64,
+}
+
+/// Asks whether these POI roots have been published. Carries no commitments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidatePoiMerklerootsParams {
+    #[serde(flatten)]
+    pub chain: ChainParams,
+    pub list_key: ListKey,
+    pub poi_merkleroots: Vec<MerkleRoot>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,8 +116,6 @@ pub struct ValidateTxidMerklerootParams {
     pub index: u32,
     pub merkleroot: MerkleRoot,
 }
-
-pub type PoisPerListMap = HashMap<BlindedCommitment, HashMap<ListKey, PoiNodeStatus>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

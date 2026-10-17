@@ -5,10 +5,6 @@ use alloy::{
     sol_types::SolCall,
 };
 use kohaku_eip_1193::provider::{AccountStateOverride, Eip1193Error, Eip1193Provider};
-use rand::CryptoRng;
-use serde::Serialize;
-use thiserror::Error;
-use tracing::{info, warn};
 use kohaku_userop_kit::{
     builder::UserOperationBuilder,
     bundler::{Bundler, BundlerError, BundlerExt},
@@ -16,6 +12,10 @@ use kohaku_userop_kit::{
     smart_account::SmartAccount,
     user_operation::UserOperationGasEstimate,
 };
+use rand::CryptoRng;
+use serde::Serialize;
+use thiserror::Error;
+use tracing::info;
 
 use crate::{
     account::{address::RailgunAddress, chain::ChainId, signer::RailgunSigner},
@@ -23,6 +23,7 @@ use crate::{
     caip::AssetId,
     chain_config::ChainConfig,
     circuit::groth16_prover::Groth16Prover,
+    crypto::keys::ViewingPublicKey,
     indexer::utxo_indexer::{UtxoIndexer, UtxoIndexerError},
     note::{Note, utxo::UtxoNote},
     poi::{
@@ -56,8 +57,9 @@ pub struct GasSimulationDetails {
 #[cfg_attr(js, derive(tsify::Tsify))]
 pub struct BalanceEntry {
     pub asset: AssetId,
-    /// If POI is enabled, the spendability status of the note according to the POI provider.
-    /// A failed lookup is `Unavailable`, never `Missing`. None when POI is disabled.
+    /// If POI is enabled, the spendability status from the local list copy.
+    /// `Unavailable` means that list is not caught up. It is never `Missing`.
+    /// None when POI is disabled.
     #[serde(rename = "poiStatus")]
     pub poi_status: Option<PoiStatus>,
     pub amount: u128,
@@ -67,8 +69,9 @@ pub struct BalanceEntry {
 #[cfg_attr(js, derive(tsify::Tsify))]
 pub struct NoteEntry {
     pub asset: AssetId,
-    /// If POI is enabled, the spendability status of the note according to the POI provider.
-    /// A failed lookup is `Unavailable`, never `Missing`. None when POI is disabled.
+    /// If POI is enabled, the spendability status from the local list copy.
+    /// `Unavailable` means that list is not caught up. It is never `Missing`.
+    /// None when POI is disabled.
     #[serde(rename = "poiStatus")]
     pub poi_status: Option<PoiStatus>,
     pub amount: u128,
@@ -123,6 +126,49 @@ pub struct RailgunProvider {
     utxo_indexer: UtxoIndexer,
     prover: Groth16Prover,
     poi_provider: Option<PoiProvider>,
+}
+
+/// Unspent notes a build may spend, plus accounts whose POI status was not observed.
+struct SpendableNotes {
+    notes: Vec<UtxoNote>,
+    unavailable: Vec<(ViewingPublicKey, AssetId)>,
+}
+
+impl SpendableNotes {
+    fn from_unspent(poi_enabled: bool, in_notes: Vec<(UtxoNote, Option<PoiStatus>)>) -> Self {
+        let unavailable = in_notes
+            .iter()
+            .filter(|(_, status)| *status == Some(PoiStatus::Unavailable))
+            .map(|(note, _)| (note.viewing_pubkey, note.asset))
+            .collect();
+        let notes = if poi_enabled {
+            in_notes
+                .into_iter()
+                .filter(|(_, status)| *status == Some(PoiStatus::Valid))
+                .map(|(note, _)| note)
+                .collect()
+        } else {
+            in_notes.into_iter().map(|(note, _)| note).collect()
+        };
+        Self { notes, unavailable }
+    }
+
+    /// An insufficient balance is an observation failure when this account and asset
+    /// still has notes whose POI status could not be read. Valid notes are already
+    /// the only inputs, so a covered amount does not take this path.
+    fn explain(
+        &self,
+        result: Result<Vec<ProvedOperation>, TransactionBuilderError>,
+    ) -> Result<Vec<ProvedOperation>, RailgunProviderError> {
+        match result {
+            Err(TransactionBuilderError::InsufficientBalance { from, asset, .. })
+                if self.unavailable.contains(&(from.viewing_pubkey(), asset)) =>
+            {
+                Err(RailgunProviderError::PoiStatusUnavailable)
+            }
+            result => result.map_err(Into::into),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -207,7 +253,8 @@ impl RailgunProvider {
     }
 
     /// Syncs to the latest block without generating or submitting POI proofs.
-    /// This still performs indexer, root and owned POI status reads.
+    /// This still copies POI lists and checks txid roots. List reads name leaf
+    /// ranges, not the wallet's commitments.
     ///
     /// # Errors
     /// Returns an error if synchronization, validation or persistence fails.
@@ -217,7 +264,7 @@ impl RailgunProvider {
 
     /// Syncs to the specified block without generating or submitting POI proofs.
     /// Pending POI work is retained for [`Self::process_pending_poi`]. This is
-    /// not a no-disclosure scan: owned POI status and root reads can occur.
+    /// not a no-disclosure scan: list pages and txid roots are still read.
     ///
     /// # Errors
     /// Returns an error if synchronization, validation or persistence fails.
@@ -239,8 +286,8 @@ impl RailgunProvider {
 
     /// Explicitly generates and submits pending POI proofs when POI is enabled.
     /// Processing is best effort: individual proof/service failures remain
-    /// queued and are logged; `Ok` is not proof acceptance. Observe owned POI
-    /// status separately before spending. This processes the whole queue and
+    /// queued and are logged; `Ok` is not proof acceptance. Observe the local
+    /// list copy separately before spending. This processes the whole queue and
     /// provides no per-proof review or durable send-attempt journal.
     ///
     /// # Errors
@@ -265,7 +312,8 @@ impl RailgunProvider {
     /// Returns the balance for the given address.
     ///
     /// If POI is enabled, groups balances by observed POI status. Only `Valid`
-    /// is spendable; `Unavailable` means the lookup failed, not that a proof is missing.
+    /// is spendable. `Unavailable` means the local list is not caught up, not
+    /// that a proof is missing.
     pub async fn balance(&mut self, address: RailgunAddress) -> Vec<BalanceEntry> {
         let mut balance_map = HashMap::new();
         for note in self.notes(address).await {
@@ -319,15 +367,16 @@ impl RailgunProvider {
         builder: TransactionBuilder,
         rng: &mut impl CryptoRng,
     ) -> Result<ProvedTx, RailgunProviderError> {
-        let spendable_notes = self.spendable_notes().await;
-        let operations = builder
+        let spendable = self.spendable_notes().await;
+        let built = builder
             .build_dummy(
                 self.chain.id,
-                &spendable_notes,
+                &spendable.notes,
                 &self.utxo_indexer.utxo_trees,
                 rng,
             )
-            .await?;
+            .await;
+        let operations = spendable.explain(built)?;
         Ok(ProvedTx::new(self.chain.railgun_smart_wallet, operations))
     }
 
@@ -374,15 +423,16 @@ impl RailgunProvider {
                 fee,
                 "fee",
             );
-        let spendable_notes = self.spendable_notes().await;
-        let operations = adapted
+        let spendable = self.spendable_notes().await;
+        let built = adapted
             .build_dummy(
                 self.chain.id,
-                &spendable_notes,
+                &spendable.notes,
                 &self.utxo_indexer.utxo_trees,
                 rng,
             )
-            .await?;
+            .await;
+        let operations = spendable.explain(built)?;
         self.userop_from(
             &operations,
             sender,
@@ -895,18 +945,8 @@ impl RailgunProvider {
 
         let mut annotated_notes = Vec::new();
         for note in notes {
-            let status = poi_provider
-                .status(note.blinded_commitment.into(), note.commitment_type)
-                .await;
-            match status {
-                Ok(status) => {
-                    annotated_notes.push((note, Some(status)));
-                }
-                Err(e) => {
-                    warn!("Error checking POI for note {}: {}", note, e);
-                    annotated_notes.push((note, Some(PoiStatus::Unavailable)));
-                }
-            }
+            let status = poi_provider.status(note.blinded_commitment.into(), note.commitment_type);
+            annotated_notes.push((note, Some(status)));
         }
 
         annotated_notes
@@ -917,54 +957,25 @@ impl RailgunProvider {
         builder: TransactionBuilder,
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<ProvedOperation>, RailgunProviderError> {
-        let in_notes = self.all_unspent().await;
-        let unavailable: Vec<_> = in_notes
-            .iter()
-            .filter(|(_, status)| *status == Some(PoiStatus::Unavailable))
-            .map(|(note, _)| (note.viewing_pubkey, note.asset))
-            .collect();
-        let spendable_notes: Vec<UtxoNote> = if let Some(_) = self.poi_provider {
-            in_notes
-                .into_iter()
-                .filter(|(_, status)| *status == Some(PoiStatus::Valid))
-                .map(|(note, _)| note)
-                .collect()
-        } else {
-            in_notes.into_iter().map(|(note, _)| note).collect()
-        };
-
-        let operations = builder
+        let spendable = self.spendable_notes().await;
+        let built = builder
             .build(
                 &self.prover,
                 self.chain.id,
-                &spendable_notes,
+                &spendable.notes,
                 &self.utxo_indexer.utxo_trees,
                 rng,
             )
             .await;
-
-        match operations {
-            Err(TransactionBuilderError::InsufficientBalance { from, asset, .. })
-                if unavailable.contains(&(from.viewing_pubkey(), asset)) =>
-            {
-                Err(RailgunProviderError::PoiStatusUnavailable)
-            }
-            result => result.map_err(Into::into),
-        }
+        spendable.explain(built)
     }
 
-    /// Notes usable as inputs: all unspent notes, restricted to POI-valid ones when POI is on.
-    async fn spendable_notes(&mut self) -> Vec<UtxoNote> {
-        let in_notes = self.all_unspent().await;
-        if self.poi_provider.is_some() {
-            in_notes
-                .into_iter()
-                .filter(|(_, status)| *status == Some(PoiStatus::Valid))
-                .map(|(note, _)| note)
-                .collect()
-        } else {
-            in_notes.into_iter().map(|(note, _)| note).collect()
-        }
+    /// Notes usable as inputs, and the account/asset pairs that could not be observed.
+    ///
+    /// When POI is on, only `Valid` notes are inputs. `Unavailable` is not an input,
+    /// but every build reports it when that is what made the balance look short.
+    async fn spendable_notes(&mut self) -> SpendableNotes {
+        SpendableNotes::from_unspent(self.poi_provider.is_some(), self.all_unspent().await)
     }
 }
 
@@ -1076,9 +1087,7 @@ mod poi_availability_tests {
     };
     use alloy::providers::Provider;
     use kohaku_kv_store::Store;
-    use serde_json::{Value, json};
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         time::{Duration, timeout},
     };
@@ -1094,98 +1103,6 @@ mod poi_availability_tests {
         async fn sync(&self, _: u64, _: u64) -> Result<Vec<SyncEvent>, SyncerError> {
             panic!("no sync expected")
         }
-    }
-
-    #[derive(Clone)]
-    enum Answer {
-        Status(PoiStatus),
-        RpcError,
-        Malformed,
-        Incomplete,
-        Disconnect,
-        Mixed,
-    }
-
-    // A bounded loopback endpoint. Public seeded notes only; no chain, indexer,
-    // membership or artifact requests are permitted by this fixture.
-    async fn service(answer: Answer, calls: usize) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            for call in 0..calls {
-                let answer = if matches!(answer, Answer::Mixed) {
-                    if call % 2 == 0 {
-                        Answer::Status(PoiStatus::Valid)
-                    } else {
-                        Answer::RpcError
-                    }
-                } else {
-                    answer.clone()
-                };
-                let (mut socket, _) = timeout(Duration::from_secs(5), listener.accept())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let mut bytes = Vec::new();
-                let mut buffer = [0; 1024];
-                let request: Value = loop {
-                    let n = timeout(Duration::from_secs(5), socket.read(&mut buffer))
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    assert!(n > 0 && bytes.len() + n <= 4096);
-                    bytes.extend_from_slice(&buffer[..n]);
-                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let headers = std::str::from_utf8(&bytes[..end]).unwrap();
-                        let len: usize = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse().unwrap())
-                            })
-                            .unwrap();
-                        if bytes.len() >= end + 4 + len {
-                            break serde_json::from_slice(&bytes[end + 4..end + 4 + len]).unwrap();
-                        }
-                    }
-                };
-                assert_eq!(request["method"], "ppoi_pois_per_list");
-                assert_eq!(request["params"]["chainID"], "11155111");
-                if matches!(answer, Answer::Disconnect) {
-                    continue;
-                }
-                let mut body = json!({"jsonrpc": "2.0", "id": request["id"]});
-                match &answer {
-                    Answer::Status(status) => {
-                        let commitment =
-                            request["params"]["blindedCommitmentDatas"][0]["blindedCommitment"]
-                                .as_str()
-                                .unwrap();
-                        body["result"] = json!({ commitment: {LIST: status} });
-                    }
-                    Answer::RpcError => {
-                        body["error"] = json!({"code": -32000, "message": "Fixture unavailable"});
-                    }
-                    Answer::Incomplete => body["result"] = json!({}),
-                    Answer::Malformed | Answer::Disconnect | Answer::Mixed => {}
-                }
-                let body = if matches!(answer, Answer::Malformed) {
-                    "not JSON".to_owned()
-                } else {
-                    body.to_string()
-                };
-                let wire = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                timeout(Duration::from_secs(5), socket.write_all(wire.as_bytes()))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            }
-        });
-        (url, task)
     }
 
     async fn fixture(url: &str, poi: bool) -> (RailgunProvider, Arc<dyn RailgunSigner>, AssetId) {
@@ -1248,119 +1165,49 @@ mod poi_availability_tests {
     }
 
     #[tokio::test]
-    async fn failed_lookups_are_unavailable_and_cannot_spend() {
-        for answer in [
-            Answer::RpcError,
-            Answer::Malformed,
-            Answer::Incomplete,
-            Answer::Disconnect,
-        ] {
-            let (url, task) = service(answer, 3).await;
-            let (mut provider, signer, asset) = fixture(&url, true).await;
-            let notes = timeout(Duration::from_secs(5), provider.notes(signer.address()))
-                .await
-                .unwrap();
-            assert_eq!(notes.len(), 1);
-            assert_eq!(notes[0].poi_status, Some(PoiStatus::Unavailable));
-            assert_eq!(
-                serde_json::to_value(&notes[0]).unwrap()["poiStatus"],
-                "Unavailable"
-            );
-            let balance = timeout(Duration::from_secs(5), provider.balance(signer.address()))
-                .await
-                .unwrap();
-            assert_eq!(balance.len(), 1);
-            assert_eq!(balance[0].amount, 10);
-            assert_eq!(balance[0].poi_status, Some(PoiStatus::Unavailable));
-            let builder =
-                provider
-                    .transact()
-                    .transfer(signer.clone(), signer.address(), asset, 1, "");
-            let result = timeout(
-                Duration::from_secs(5),
-                provider.build(builder, &mut rand::rng()),
-            )
-            .await
-            .unwrap();
-            assert!(matches!(
-                result,
-                Err(RailgunProviderError::PoiStatusUnavailable)
-            ));
-            task.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn completed_statuses_keep_their_meaning() {
-        for status in [
-            PoiStatus::Missing,
-            PoiStatus::Valid,
-            PoiStatus::ProofSubmitted,
-            PoiStatus::ShieldBlocked,
-        ] {
-            let (url, task) = service(Answer::Status(status), 2).await;
-            let (mut provider, signer, _) = fixture(&url, true).await;
-            assert_eq!(
-                timeout(Duration::from_secs(5), provider.notes(signer.address()))
-                    .await
-                    .unwrap()[0]
-                    .poi_status,
-                Some(status)
-            );
-            assert_eq!(
-                timeout(Duration::from_secs(5), provider.balance(signer.address()))
-                    .await
-                    .unwrap()[0]
-                    .poi_status,
-                Some(status)
-            );
-            task.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn mixed_notes_remain_visible_in_separate_balance_groups() {
-        let (url, task) = service(Answer::Mixed, 6).await;
-        let (mut provider, signer, asset) = fixture_with_notes(&url, true, 2).await;
+    async fn unsynced_notes_are_unavailable_and_cannot_spend() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (mut provider, signer, asset) = fixture(&url, true).await;
         let notes = timeout(Duration::from_secs(5), provider.notes(signer.address()))
             .await
             .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].poi_status, Some(PoiStatus::Unavailable));
         assert_eq!(
-            notes.iter().map(|note| note.poi_status).collect::<Vec<_>>(),
-            vec![Some(PoiStatus::Valid), Some(PoiStatus::Unavailable)]
+            serde_json::to_value(&notes[0]).unwrap()["poiStatus"],
+            "Unavailable"
         );
         let balance = timeout(Duration::from_secs(5), provider.balance(signer.address()))
             .await
             .unwrap();
-        assert_eq!(balance.len(), 2);
-        assert!(
-            balance
-                .iter()
-                .any(|entry| entry.poi_status == Some(PoiStatus::Valid) && entry.amount == 10)
-        );
-        assert!(balance.iter().any(|entry| entry.poi_status == Some(PoiStatus::Unavailable) && entry.amount == 10));
-        // The valid note is sufficient: pass selection despite the unavailable
-        // second note, then stop at the absent local tree before proving/artifacts.
+        assert_eq!(balance.len(), 1);
+        assert_eq!(balance[0].amount, 10);
+        assert_eq!(balance[0].poi_status, Some(PoiStatus::Unavailable));
         let builder = provider
             .transact()
             .transfer(signer.clone(), signer.address(), asset, 1, "");
+        let result = timeout(
+            Duration::from_secs(5),
+            provider.build(builder, &mut rand::rng()),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
-            timeout(
-                Duration::from_secs(5),
-                provider.build(builder, &mut rand::rng())
-            )
-            .await
-            .unwrap(),
-            Err(RailgunProviderError::Build(
-                TransactionBuilderError::MissingTree(0)
-            ))
+            result,
+            Err(RailgunProviderError::PoiStatusUnavailable)
         ));
-        task.await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn unavailable_notes_of_another_asset_do_not_mask_insufficient_balance() {
-        let (url, task) = service(Answer::RpcError, 1).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
         let (mut provider, signer, _) = fixture(&url, true).await;
         let builder = provider.transact().transfer(
             signer.clone(),
@@ -1380,29 +1227,11 @@ mod poi_availability_tests {
                 TransactionBuilderError::InsufficientBalance { .. }
             ))
         ));
-        task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn genuine_missing_is_not_an_availability_error() {
-        let (url, task) = service(Answer::Status(PoiStatus::Missing), 1).await;
-        let (mut provider, signer, asset) = fixture(&url, true).await;
-        let builder = provider
-            .transact()
-            .transfer(signer.clone(), signer.address(), asset, 1, "");
-        let result = timeout(
-            Duration::from_secs(5),
-            provider.build(builder, &mut rand::rng()),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            result,
-            Err(RailgunProviderError::Build(
-                TransactionBuilderError::InsufficientBalance { .. }
-            ))
-        ));
-        task.await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1446,8 +1275,126 @@ mod poi_availability_tests {
             "Unavailable".parse::<PoiStatus>().unwrap(),
             PoiStatus::Unavailable
         );
+        assert_eq!(
+            PoiStatus::from(crate::poi::types::PoiNodeStatus::Missing),
+            PoiStatus::Missing
+        );
         assert!(
             serde_json::from_str::<crate::poi::types::PoiNodeStatus>("\"Unavailable\"").is_err()
         );
+    }
+}
+
+#[cfg(all(test, native))]
+mod spendable_notes_tests {
+    use alloy::primitives::Address;
+
+    use super::*;
+    use crate::{
+        account::signer::{PrivateKeySigner, RailgunSigner},
+        caip::AssetId,
+        crypto::keys::{ByteKey, SpendingKey, ViewingKey},
+        note::utxo::UtxoNote,
+        poi::types::BlindedCommitmentType,
+        transact::TransactionBuilderError,
+    };
+
+    fn signer() -> std::sync::Arc<PrivateKeySigner> {
+        PrivateKeySigner::new_evm(
+            SpendingKey::from_bytes([1; 32]),
+            ViewingKey::from_bytes([2; 32]),
+            11_155_111,
+        )
+    }
+
+    fn note(signer: std::sync::Arc<PrivateKeySigner>, asset: AssetId, value: u128) -> UtxoNote {
+        UtxoNote::new(
+            0,
+            0,
+            signer,
+            asset,
+            value,
+            [5; 16],
+            "public fixture",
+            BlindedCommitmentType::Transact,
+        )
+    }
+
+    #[test]
+    fn a_valid_note_stays_spendable_beside_an_unavailable_one() {
+        let signer = signer();
+        let asset = AssetId::erc20(Address::repeat_byte(0x11));
+        let valid = note(signer.clone(), asset, 7);
+        let unavailable = note(signer, asset, 10);
+        let selected = SpendableNotes::from_unspent(
+            true,
+            vec![
+                (valid, Some(PoiStatus::Valid)),
+                (unavailable, Some(PoiStatus::Unavailable)),
+            ],
+        );
+        assert_eq!(selected.notes.len(), 1);
+        assert_eq!(selected.notes[0].value, 7);
+        assert!(selected.explain(Ok(vec![])).is_ok());
+    }
+
+    #[test]
+    fn missing_is_not_an_availability_error() {
+        let signer = signer();
+        let asset = AssetId::erc20(Address::repeat_byte(0x11));
+        let missing = note(signer.clone(), asset, 10);
+        let selected =
+            SpendableNotes::from_unspent(true, vec![(missing, Some(PoiStatus::Missing))]);
+        assert!(selected.notes.is_empty());
+        let err = selected.explain(Err(TransactionBuilderError::InsufficientBalance {
+            from: signer.address(),
+            asset,
+            value: 1,
+        }));
+        assert!(matches!(
+            err,
+            Err(RailgunProviderError::Build(
+                TransactionBuilderError::InsufficientBalance { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn unavailable_on_another_asset_does_not_mask_a_shortfall() {
+        let signer = signer();
+        let wanted = AssetId::erc20(Address::repeat_byte(0x11));
+        let other = AssetId::erc20(Address::repeat_byte(0x22));
+        let unavailable = note(signer.clone(), other, 10);
+        let selected =
+            SpendableNotes::from_unspent(true, vec![(unavailable, Some(PoiStatus::Unavailable))]);
+        let err = selected.explain(Err(TransactionBuilderError::InsufficientBalance {
+            from: signer.address(),
+            asset: wanted,
+            value: 1,
+        }));
+        assert!(matches!(
+            err,
+            Err(RailgunProviderError::Build(
+                TransactionBuilderError::InsufficientBalance { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_shortfall_on_an_unobserved_asset_is_unavailable() {
+        let signer = signer();
+        let asset = AssetId::erc20(Address::repeat_byte(0x11));
+        let unavailable = note(signer.clone(), asset, 10);
+        let selected =
+            SpendableNotes::from_unspent(true, vec![(unavailable, Some(PoiStatus::Unavailable))]);
+        let err = selected.explain(Err(TransactionBuilderError::InsufficientBalance {
+            from: signer.address(),
+            asset,
+            value: 1,
+        }));
+        assert!(matches!(
+            err,
+            Err(RailgunProviderError::PoiStatusUnavailable)
+        ));
     }
 }

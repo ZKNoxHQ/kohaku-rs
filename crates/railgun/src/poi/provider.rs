@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use alloy::primitives::ChainId;
 use kohaku_kv_store::Store;
@@ -20,10 +23,11 @@ use crate::{
         syncer::{Operation, TxidSyncer},
         txid_indexer::{TxidIndexer, TxidIndexerError},
     },
-    merkle_tree::{MerkleProof, TOTAL_LEAVES, TxidMerkleTree, UtxoTreeIndex},
+    merkle_tree::{TOTAL_LEAVES, TxidMerkleTree, UtxoTreeIndex},
     note::utxo::{self, UtxoNote},
     poi::{
         client::{PoiClient, PoiClientError, PoiNodeClient},
+        lists::{PoiLists, PoiSyncError},
         note::PoiNote,
         recovery::RecoveryAccount,
         types::{BlindedCommitment, BlindedCommitmentType, ListKey, PoiStatus, TransactProofData},
@@ -37,15 +41,18 @@ pub struct PoiProvider {
     db: Store,
     poi_client: PoiClient,
     txid_indexer: TxidIndexer,
+    lists: PoiLists,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct PoiProviderState {
     pub pending: Vec<PendingPoiEntry>,
-    pub pois: HashMap<BlindedCommitment, HashMap<ListKey, PoiInfo>>,
+    /// Outputs of proofs we submitted that are not in the local POI tree yet.
+    #[serde(default)]
+    pub submitted: HashMap<ListKey, HashSet<BlindedCommitment>>,
     /// Past operations already seen as `Valid`, not probed again.
     #[serde(default)]
-    pub recovered_valid: std::collections::HashSet<Txid>,
+    pub recovered_valid: HashSet<Txid>,
 }
 
 #[derive(Debug, Error)]
@@ -58,12 +65,8 @@ pub enum PoiProviderError {
     ProofNotFound(BlindedCommitment, ListKey),
     #[error("Database error: {0}")]
     Database(#[from] DatabaseError),
-}
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-pub struct PoiInfo {
-    status: Option<PoiStatus>,
-    proof: Option<MerkleProof>,
+    #[error("POI list sync failed: {0}")]
+    Sync(#[from] PoiSyncError),
 }
 
 /// Serializable snapshot needed to re-prove and submit a post-transaction POI
@@ -118,6 +121,8 @@ enum PendingPoiError {
     MissingUtxoTree(u32),
     #[error("Missing TXID tree {0}")]
     MissingTxidTree(u32),
+    #[error("POI proof not found for blinded commitment {0} on list {1}")]
+    ProofNotFound(BlindedCommitment, ListKey),
 }
 
 impl PoiProvider {
@@ -131,12 +136,14 @@ impl PoiProvider {
         let inner = db.get_poi_provider().await?;
         let txid_indexer = TxidIndexer::new(db.clone(), txid_syncer).await?;
         let poi_client = PoiClient::new(chain_id, poi_endpoint, list_keys);
+        let lists = PoiLists::load(db.clone(), &poi_client.list_keys()).await?;
 
         Ok(Self {
             inner,
             db,
             poi_client,
             txid_indexer,
+            lists,
         })
     }
 
@@ -145,6 +152,9 @@ impl PoiProvider {
         to_block: u64,
         accounts: &[RecoveryAccount],
     ) -> Result<(), PoiProviderError> {
+        self.lists.sync(&self.poi_client).await?;
+        self.drop_included_submissions();
+
         // Keep the full record of the operations spending our notes.
         self.txid_indexer.watch_nullifiers(
             accounts
@@ -219,24 +229,80 @@ impl PoiProvider {
     }
 
     /// Returns the worst-case POI status across all configured list keys.
-    pub async fn status(
-        &mut self,
+    ///
+    /// Read entirely from the local list copy. A commitment in the tree is
+    /// `Valid`. One we submitted that has not landed yet is `ProofSubmitted`.
+    /// Absence is `Missing` only after this process has copied the list through
+    /// its zero leaf. Until then it is `Unavailable`: the list was not observed,
+    /// and asking the node about this commitment would name it. A blocked shield
+    /// is not queried separately, so once the list is caught up it is `Missing`.
+    pub fn status(
+        &self,
         blinded_commitment: BlindedCommitment,
-        commitment_type: BlindedCommitmentType,
-    ) -> Result<PoiStatus, PoiProviderError> {
+        _commitment_type: BlindedCommitmentType,
+    ) -> PoiStatus {
         let mut worst = PoiStatus::Valid;
         for list_key in self.list_keys() {
-            let status = self
-                .poi_client
-                .poi_status(&list_key, blinded_commitment, commitment_type)
-                .await?;
-            debug!(
-                "POI status for {} ({list_key}): {status:?}",
-                blinded_commitment
-            );
+            let status = if self.lists.contains(&list_key, blinded_commitment) {
+                PoiStatus::Valid
+            } else if self
+                .inner
+                .submitted
+                .get(&list_key)
+                .is_some_and(|set| set.contains(&blinded_commitment))
+            {
+                PoiStatus::ProofSubmitted
+            } else if self.lists.caught_up(&list_key) {
+                PoiStatus::Missing
+            } else {
+                PoiStatus::Unavailable
+            };
+            debug!("POI status for list {list_key}: {status:?}");
             worst = worst.max(status);
         }
-        Ok(worst)
+        worst
+    }
+
+    fn drop_included_submissions(&mut self) {
+        let included: Vec<(ListKey, BlindedCommitment)> = self
+            .inner
+            .submitted
+            .iter()
+            .flat_map(|(list_key, commitments)| {
+                commitments.iter().filter_map(|commitment| {
+                    self.lists
+                        .contains(list_key, *commitment)
+                        .then_some((list_key.clone(), *commitment))
+                })
+            })
+            .collect();
+        for (list_key, commitment) in included {
+            let empty = {
+                let Some(set) = self.inner.submitted.get_mut(&list_key) else {
+                    continue;
+                };
+                set.remove(&commitment);
+                set.is_empty()
+            };
+            if empty {
+                self.inner.submitted.remove(&list_key);
+            }
+        }
+    }
+
+    fn note_submitted(&mut self, list_keys: &[ListKey], outputs: &[BlindedCommitment]) {
+        for list_key in list_keys {
+            for output in outputs {
+                if self.lists.contains(list_key, *output) {
+                    continue;
+                }
+                self.inner
+                    .submitted
+                    .entry(list_key.clone())
+                    .or_default()
+                    .insert(*output);
+            }
+        }
     }
 
     /// Drops pending entries of operations that were proved but never mined.
@@ -295,25 +361,22 @@ impl PoiProvider {
             };
 
             // All outputs of an operation share one proof: probing the first one is enough.
-            let Some(probe) = blinded_commitments(
-                &entry,
-                op.utxo_tree_out,
-                op.utxo_out_start_index,
-            )
-            .into_iter()
-            .next() else {
+            let Some(probe) =
+                blinded_commitments(&entry, op.utxo_tree_out, op.utxo_out_start_index)
+                    .into_iter()
+                    .next()
+            else {
                 continue;
             };
-            match self.status(probe, BlindedCommitmentType::Transact).await {
-                Ok(PoiStatus::Missing) => {
+            match self.status(probe, BlindedCommitmentType::Transact) {
+                PoiStatus::Missing => {
                     info!("POI missing for past operation {txid:?}, rebuilding its proof");
                     queued.push((op.block_number, entry));
                 }
-                Ok(PoiStatus::Valid) => {
+                PoiStatus::Valid => {
                     self.inner.recovered_valid.insert(txid);
                 }
-                Ok(status) => debug!("Past operation {txid:?} has POI status {status:?}"),
-                Err(e) => warn!("Could not read POI status of past operation {txid:?}: {e}"),
+                status => debug!("Past operation {txid:?} has POI status {status:?}"),
             }
         }
 
@@ -321,7 +384,9 @@ impl PoiProvider {
         // first, which matters when an operation spends the change of a previous one.
         queued.sort_by(|a, b| b.0.cmp(&a.0));
         let count = queued.len();
-        self.inner.pending.extend(queued.into_iter().map(|(_, e)| e));
+        self.inner
+            .pending
+            .extend(queued.into_iter().map(|(_, e)| e));
         count
     }
 
@@ -344,6 +409,9 @@ impl PoiProvider {
                 Err(PendingPoiError::MissingTxid(_)) => {
                     info!("Waiting for txid to be indexed: {:?}", entry.txid);
                 }
+                Err(PendingPoiError::ProofNotFound(commitment, list_key)) => {
+                    info!("Waiting for input {commitment} to appear in POI list {list_key}");
+                }
                 Err(e) => {
                     warn!("Failed to submit POI for pending entry: {:?}", e);
                 }
@@ -352,7 +420,7 @@ impl PoiProvider {
     }
 
     async fn submit_poi(
-        &self,
+        &mut self,
         prover: &Groth16Prover,
         entry: &PendingPoiEntry,
     ) -> Result<(), PendingPoiError> {
@@ -387,6 +455,8 @@ impl PoiProvider {
             .await?;
 
         self.poi_client.submit_proof(proof_data).await?;
+        let outputs = blinded_commitments(entry, utxo_tree_number, utxo_leaf_index);
+        self.note_submitted(&entry.list_keys, &outputs);
         Ok(())
     }
 
@@ -405,10 +475,11 @@ impl PoiProvider {
         for list_key in &entry.list_keys {
             let mut in_notes = Vec::new();
             for note in entry.in_notes.clone() {
+                let commitment = note.blinded_commitment.into();
                 let proof = self
-                    .poi_client
-                    .merkle_proof(list_key, note.blinded_commitment.into())
-                    .await?;
+                    .lists
+                    .proof(list_key, commitment)
+                    .ok_or_else(|| PendingPoiError::ProofNotFound(commitment, list_key.clone()))?;
                 in_notes.push(PoiNote::new(
                     note,
                     HashMap::from([(list_key.clone(), proof)]),
@@ -768,8 +839,9 @@ mod submission_control_tests {
         }
     }
 
-    // The fixture serves only index/root reads. A membership request is recorded
-    // and rejected before proving, so no artifact acquisition or proof submission can occur.
+    // The fixture serves list pages and index/root reads. A full page of the POI
+    // zero ends the list copy. Membership is local, so processing never asks the
+    // node for a commitment.
     async fn service() -> (
         String,
         Arc<Mutex<Vec<String>>>,
@@ -816,12 +888,18 @@ mod submission_control_tests {
                 recorded.lock().unwrap().push(method.to_owned());
                 let mut body = serde_json::json!({"jsonrpc": "2.0", "id": value["id"]});
                 match method {
+                    "ppoi_poi_merkletree_leaves" => {
+                        body["result"] = serde_json::json!([
+                            "0x0488f89b25bc7011eaf6a5edce71aeafb9fe706faa3c0a5cd9cbe868ae3b9ffc"
+                        ]);
+                    }
+                    "ppoi_validate_poi_merkleroots" => body["result"] = serde_json::json!(true),
                     "ppoi_validated_txid" => {
                         body["result"] = serde_json::json!({"validatedTxidIndex": 0});
                     }
                     "ppoi_validate_txid_merkleroot" => body["result"] = serde_json::json!(true),
                     _ => {
-                        body["error"] = serde_json::json!({"code": -32602, "message": "Fixture refuses membership and submission"});
+                        body["error"] = serde_json::json!({"code": -32602, "message": "Fixture refuses submission"});
                     }
                 }
                 let body = body.to_string();
@@ -936,14 +1014,18 @@ mod submission_control_tests {
         .unwrap();
         assert_eq!(
             *methods.lock().unwrap(),
-            vec!["ppoi_validated_txid", "ppoi_validate_txid_merkleroot"]
+            vec![
+                "ppoi_poi_merkletree_leaves",
+                "ppoi_validated_txid",
+                "ppoi_validate_txid_merkleroot"
+            ]
         );
         assert_eq!(db.get_poi_provider().await.unwrap().pending.len(), 1);
         assert_eq!(db.get_poi_provider().await.unwrap().pending[0].txid, txid);
 
-        // Explicit processing reaches membership. The fixture refuses it before
-        // any prover/artifact request, and the existing best-effort semantics
-        // keep the entry pending rather than treating Ok as acceptance.
+        // Explicit processing looks for an inclusion proof in the local list.
+        // The empty list has none, so this stops before the prover and sends
+        // nothing. The entry stays pending.
         timeout(Duration::from_secs(10), runtime.process_pending_poi())
             .await
             .unwrap()
@@ -951,9 +1033,9 @@ mod submission_control_tests {
         assert_eq!(
             *methods.lock().unwrap(),
             vec![
+                "ppoi_poi_merkletree_leaves",
                 "ppoi_validated_txid",
                 "ppoi_validate_txid_merkleroot",
-                "ppoi_merkle_proofs"
             ]
         );
         assert_eq!(db.get_poi_provider().await.unwrap().pending.len(), 1);
@@ -965,11 +1047,11 @@ mod submission_control_tests {
         assert_eq!(
             *methods.lock().unwrap(),
             vec![
+                "ppoi_poi_merkletree_leaves",
                 "ppoi_validated_txid",
                 "ppoi_validate_txid_merkleroot",
-                "ppoi_merkle_proofs",
+                "ppoi_poi_merkletree_leaves",
                 "ppoi_validated_txid",
-                "ppoi_merkle_proofs",
             ]
         );
         assert_eq!(db.get_poi_provider().await.unwrap().pending.len(), 1);

@@ -36,8 +36,7 @@ const COMMITMENTS_QUERY: &str = include_str!("./subsquid_graphql/commitments.gra
 const NULLIFIERS_QUERY: &str = include_str!("./subsquid_graphql/nullifiers.graphql");
 const OPERATIONS_QUERY: &str = include_str!("./subsquid_graphql/operations.graphql");
 /// Same query without `hasUnshield`, used if the indexer schema lacks the field.
-const OPERATIONS_LEGACY_QUERY: &str =
-    include_str!("./subsquid_graphql/operations_legacy.graphql");
+const OPERATIONS_LEGACY_QUERY: &str = include_str!("./subsquid_graphql/operations_legacy.graphql");
 const BLOCK_NUMBER_QUERY: &str = include_str!("./subsquid_graphql/block_number.graphql");
 
 impl SubsquidSyncer {
@@ -189,7 +188,8 @@ impl SubsquidSyncer {
             // treats every operation as having no unshield.
             Err(SubsquidSyncerError::GraphQL(msg)) if msg.contains("hasUnshield") => {
                 tracing::warn!("Indexer schema has no hasUnshield field, falling back: {msg}");
-                self.operations_with(OPERATIONS_LEGACY_QUERY, from, to).await
+                self.operations_with(OPERATIONS_LEGACY_QUERY, from, to)
+                    .await
             }
             other => other,
         }
@@ -201,23 +201,17 @@ impl SubsquidSyncer {
         from: u64,
         to: u64,
     ) -> Result<Vec<syncer::Operation>, SubsquidSyncerError> {
-        self.fetch_paged(
-            "operations",
-            query,
-            from,
-            to,
-            |data: OperationsResponse| {
-                let last = data.operations.last();
-                let id = last.map(|c| c.id.clone()).unwrap_or_default();
-                let block = last.map(|c| c.block_number).unwrap_or(0);
-                let items = data
-                    .operations
-                    .into_iter()
-                    .map(syncer::Operation::from)
-                    .collect();
-                (items, id, block)
-            },
-        )
+        self.fetch_paged("operations", query, from, to, |data: OperationsResponse| {
+            let last = data.operations.last();
+            let id = last.map(|c| c.id.clone()).unwrap_or_default();
+            let block = last.map(|c| c.block_number).unwrap_or(0);
+            let items = data
+                .operations
+                .into_iter()
+                .map(syncer::Operation::from)
+                .collect();
+            (items, id, block)
+        })
         .await
     }
 

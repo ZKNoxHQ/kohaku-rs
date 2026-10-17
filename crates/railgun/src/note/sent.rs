@@ -45,7 +45,10 @@ impl SentNote {
         // iv (16) | tag (16), encoded master public key (32), token hash (32),
         // random (16) | value (16), memo
         let bundle = shared_key.decrypt_gcm(&transact.ciphertext)?;
-        if bundle.len() < 3 || bundle[0].len() != 32 || bundle[1].len() != 32 || bundle[2].len() != 32
+        if bundle.len() < 3
+            || bundle[0].len() != 32
+            || bundle[1].len() != 32
+            || bundle[2].len() != 32
         {
             return Ok(None);
         }

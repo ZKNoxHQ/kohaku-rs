@@ -240,7 +240,9 @@ async fn await_balance_update(
 
         if balance
             .iter()
-            .find(|e| e.asset == asset && e.poi_status == Some(kohaku_railgun::poi::PoiStatus::Valid))
+            .find(|e| {
+                e.asset == asset && e.poi_status == Some(kohaku_railgun::poi::PoiStatus::Valid)
+            })
             .map(|e| e.amount)
             == expected
         {

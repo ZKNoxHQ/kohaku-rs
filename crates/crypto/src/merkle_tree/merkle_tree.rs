@@ -105,7 +105,22 @@ impl<C: MerkleConfig> MerkleTree<C> {
         }
     }
 
+    /// Leaves in insertion order. Empty sibling slots are not included.
+    pub fn leaves(&self) -> &[U256] {
+        &self.tree[0]
+    }
+
     pub fn generate_proof(&self, element: U256) -> Result<MerkleProof<C>, MerkleTreeError> {
+        let initial_index = self.tree[0]
+            .iter()
+            .position(|val| *val == element)
+            .ok_or(MerkleTreeError::ElementNotFound(format!("{element}")))?;
+
+        self.generate_proof_at(initial_index)
+    }
+
+    /// Inclusion proof for the leaf at `index`, without scanning for the value.
+    pub fn generate_proof_at(&self, index: usize) -> Result<MerkleProof<C>, MerkleTreeError> {
         debug_assert!(
             self.dirty_parents.is_empty(),
             "Merkle tree has dirty parents, root may be outdated"
@@ -115,17 +130,21 @@ impl<C: MerkleConfig> MerkleTree<C> {
             warn!("Merkle tree has dirty parents, root may be outdated");
         }
 
-        let initial_index = self.tree[0]
-            .iter()
-            .position(|val| *val == element)
-            .ok_or(MerkleTreeError::ElementNotFound(format!("{element}")))?;
+        let element = self.tree[0]
+            .get(index)
+            .copied()
+            .ok_or_else(|| MerkleTreeError::ElementNotFound(format!("index {index}")))?;
 
         let mut elements = Vec::with_capacity(C::DEPTH);
-        let mut index = initial_index;
+        let mut cursor = index;
 
         for level in 0..C::DEPTH {
-            let is_left_child = index % 2 == 0;
-            let siblings_index = if is_left_child { index + 1 } else { index - 1 };
+            let is_left_child = cursor % 2 == 0;
+            let siblings_index = if is_left_child {
+                cursor + 1
+            } else {
+                cursor - 1
+            };
 
             let sibling = self.tree[level]
                 .get(siblings_index)
@@ -133,10 +152,10 @@ impl<C: MerkleConfig> MerkleTree<C> {
                 .unwrap_or(self.zeros[level]);
 
             elements.push(sibling);
-            index /= 2;
+            cursor /= 2;
         }
 
-        let proof = MerkleProof::new(element, elements, U256::from(initial_index), self.root());
+        let proof = MerkleProof::new(element, elements, U256::from(index), self.root());
         if !proof.verify() {
             return Err(MerkleTreeError::InvalidProof);
         }
