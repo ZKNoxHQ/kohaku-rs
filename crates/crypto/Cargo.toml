@@ -29,10 +29,6 @@ tracing-test = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]
-name = "pedersen"
-harness = false
-
-[[bench]]
 name = "babyjubjub"
 harness = false
 
