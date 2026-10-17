@@ -165,7 +165,7 @@ impl PoiNodeClient for PoiClient {
         let poi_status = list_key_map
             .remove(list_key)
             .ok_or_else(|| PoiClientError::ProofNotFound(list_key.clone(), blinded_commitment))?;
-        Ok(poi_status)
+        Ok(poi_status.into())
     }
 
     /// Returns the Merkle proof for a given list key and blinded commitment.
