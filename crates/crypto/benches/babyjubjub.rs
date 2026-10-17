@@ -7,7 +7,7 @@ fn main() {}
 #[cfg(not(target_arch = "wasm32"))]
 mod bench {
     use criterion::criterion_group;
-    use crypto::babyjubjub::PrivateKey;
+    use kohaku_crypto::babyjubjub::PrivateKey;
     use num_bigint::BigInt;
     use num_traits::FromPrimitive;
     use rand::random;
