@@ -142,7 +142,6 @@ impl PoiProvider {
 
     pub async fn sync_to(
         &mut self,
-        prover: &Groth16Prover,
         to_block: u64,
         accounts: &[RecoveryAccount],
     ) -> Result<(), PoiProviderError> {
@@ -170,6 +169,16 @@ impl PoiProvider {
             info!("Queued {recovered} past operation(s) for POI proof generation");
         }
 
+        self.save().await?;
+        Ok(())
+    }
+
+    /// Best-effort processing is separate from synchronization so callers can
+    /// authorize proof generation and submission explicitly.
+    pub async fn process_pending(
+        &mut self,
+        prover: &Groth16Prover,
+    ) -> Result<(), PoiProviderError> {
         self.submit_pending(prover).await;
         self.save().await?;
         Ok(())
@@ -710,5 +719,261 @@ mod prune_tests {
             sent: vec![],
         };
         assert!(!never_mined(&entry(old), &[other], &[], now));
+    }
+}
+
+#[cfg(all(test, native))]
+mod submission_control_tests {
+    use super::*;
+    use crate::{
+        account::signer::{PrivateKeySigner, RailgunSigner},
+        caip::AssetId,
+        crypto::keys::{ByteKey, SpendingKey, ViewingKey},
+        indexer::syncer::{SyncEvent, SyncerError, UtxoSyncer},
+    };
+    use alloy::primitives::address;
+    use std::sync::Mutex;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+        time::{Duration, timeout},
+    };
+
+    const FIXTURE_CHAIN_ID: u64 = 11_155_111;
+
+    struct FixtureIndexer(Operation);
+    #[async_trait::async_trait]
+    impl TxidSyncer for FixtureIndexer {
+        async fn latest_block(&self) -> Result<u64, SyncerError> {
+            Ok(1)
+        }
+        async fn sync(&self, from: u64, to: u64) -> Result<Vec<Operation>, SyncerError> {
+            Ok(if from <= to {
+                vec![self.0.clone()]
+            } else {
+                vec![]
+            })
+        }
+    }
+
+    struct EmptyUtxo;
+    #[async_trait::async_trait]
+    impl UtxoSyncer for EmptyUtxo {
+        async fn latest_block(&self) -> Result<u64, SyncerError> {
+            Ok(1)
+        }
+        async fn sync(&self, _: u64, _: u64) -> Result<Vec<SyncEvent>, SyncerError> {
+            Ok(vec![])
+        }
+    }
+
+    // The fixture serves only index/root reads. A membership request is recorded
+    // and rejected before proving, so no artifact acquisition or proof submission can occur.
+    async fn service() -> (
+        String,
+        Arc<Mutex<Vec<String>>>,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let recorded = methods.clone();
+        let (stop, mut stopping) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = tokio::select! {
+                    _ = &mut stopping => break,
+                    result = listener.accept() => result.unwrap(),
+                };
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                let value: serde_json::Value = loop {
+                    let n = timeout(Duration::from_secs(5), socket.read(&mut buffer))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(n > 0 && request.len() + n <= 4096);
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..end]).unwrap();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break serde_json::from_slice(&request[end + 4..]).unwrap();
+                        }
+                    }
+                };
+                let method = value["method"].as_str().unwrap();
+                assert_eq!(value["params"]["chainID"], FIXTURE_CHAIN_ID.to_string());
+                recorded.lock().unwrap().push(method.to_owned());
+                let mut body = serde_json::json!({"jsonrpc": "2.0", "id": value["id"]});
+                match method {
+                    "ppoi_validated_txid" => {
+                        body["result"] = serde_json::json!({"validatedTxidIndex": 0});
+                    }
+                    "ppoi_validate_txid_merkleroot" => body["result"] = serde_json::json!(true),
+                    _ => {
+                        body["error"] = serde_json::json!({"code": -32602, "message": "Fixture refuses membership and submission"});
+                    }
+                }
+                let body = body.to_string();
+                let wire = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                timeout(Duration::from_secs(5), socket.write_all(wire.as_bytes()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        });
+        (url, methods, stop, task)
+    }
+
+    fn pending_fixture() -> (Operation, PendingPoiEntry) {
+        let operation = Operation {
+            block_number: 1,
+            nullifiers: vec![U256::from(1)],
+            commitment_hashes: vec![U256::from(2)],
+            bound_params_hash: U256::from(3),
+            utxo_tree_in: 0,
+            utxo_tree_out: 0,
+            utxo_out_start_index: 0,
+            has_unshield: false,
+        };
+        let txid = Txid::new(
+            &operation.nullifiers,
+            &operation.commitment_hashes,
+            operation.bound_params_hash,
+        );
+        let signer = PrivateKeySigner::new_evm(
+            SpendingKey::from_bytes([1; 32]),
+            ViewingKey::from_bytes([2; 32]),
+            FIXTURE_CHAIN_ID,
+        );
+        let note = UtxoNote::new(
+            0,
+            0,
+            signer.clone(),
+            AssetId::erc20(address!("0xDEADDEADDEADDEADDEADDEADDEADDEADDEADDEAD")),
+            10,
+            [5; 16],
+            "public fixture",
+            BlindedCommitmentType::Shield,
+        );
+        let entry = PendingPoiEntry {
+            txid,
+            spending_pubkey: signer.spending_public_key(),
+            nullifying_key: signer.viewing_key().nullifying_key(),
+            utxo_tree_in: 0,
+            bound_params_hash: U256::from(3),
+            in_notes: vec![note],
+            out_commitments: vec![U256::from(2)],
+            out_npks: vec![U256::from(11)],
+            out_values: vec![U256::from(10)],
+            token_hash: U256::ZERO,
+            has_unshield: false,
+            list_keys: vec!["public-fixture-list".into()],
+            created_at: 0,
+        };
+        (operation, entry)
+    }
+
+    #[tokio::test]
+    async fn sync_retains_pending_work_until_explicit_processing() {
+        let (url, methods, stop, task) = service().await;
+        let db = Store::create();
+        let (operation, entry) = pending_fixture();
+        let txid = entry.txid;
+        let mut provider = PoiProvider::new(
+            FIXTURE_CHAIN_ID,
+            db.clone(),
+            Arc::new(FixtureIndexer(operation)),
+            url.clone(),
+            vec!["public-fixture-list".into()],
+        )
+        .await
+        .unwrap();
+        provider.inner.pending.push(entry);
+
+        let rpc = Arc::new(kohaku_eip_1193::alloy::Alloy::new(
+            alloy::providers::ProviderBuilder::new().connect_http(url.parse().unwrap()),
+        ));
+        let chain = crate::chain_config::ChainConfig::sepolia();
+        let utxo = crate::indexer::utxo_indexer::UtxoIndexer::new(
+            db.clone(),
+            Arc::new(EmptyUtxo),
+            Arc::new(crate::merkle_tree::SmartWalletUtxoVerifier::new(
+                chain.railgun_smart_wallet,
+                rpc.clone(),
+            )),
+        )
+        .await
+        .unwrap();
+        let mut runtime = crate::provider::RailgunProvider::new(
+            chain,
+            rpc,
+            utxo,
+            Groth16Prover::new(),
+            Some(provider),
+        )
+        .await
+        .unwrap();
+        timeout(
+            Duration::from_secs(10),
+            runtime.sync_to_without_poi_submission(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            *methods.lock().unwrap(),
+            vec!["ppoi_validated_txid", "ppoi_validate_txid_merkleroot"]
+        );
+        assert_eq!(db.get_poi_provider().await.unwrap().pending.len(), 1);
+        assert_eq!(db.get_poi_provider().await.unwrap().pending[0].txid, txid);
+
+        // Explicit processing reaches membership. The fixture refuses it before
+        // any prover/artifact request, and the existing best-effort semantics
+        // keep the entry pending rather than treating Ok as acceptance.
+        timeout(Duration::from_secs(10), runtime.process_pending_poi())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *methods.lock().unwrap(),
+            vec![
+                "ppoi_validated_txid",
+                "ppoi_validate_txid_merkleroot",
+                "ppoi_merkle_proofs"
+            ]
+        );
+        assert_eq!(db.get_poi_provider().await.unwrap().pending.len(), 1);
+        // Existing automatic convenience sync still processes the queue.
+        timeout(Duration::from_secs(10), runtime.sync_to(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *methods.lock().unwrap(),
+            vec![
+                "ppoi_validated_txid",
+                "ppoi_validate_txid_merkleroot",
+                "ppoi_merkle_proofs",
+                "ppoi_validated_txid",
+                "ppoi_merkle_proofs",
+            ]
+        );
+        assert_eq!(db.get_poi_provider().await.unwrap().pending.len(), 1);
+        stop.send(()).unwrap();
+        task.await.unwrap();
     }
 }
