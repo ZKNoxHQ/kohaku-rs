@@ -25,7 +25,7 @@ use crate::{
     circuit::groth16_prover::Groth16Prover,
     crypto::keys::ViewingPublicKey,
     indexer::utxo_indexer::{UtxoIndexer, UtxoIndexerError},
-    note::{Note, utxo::UtxoNote},
+    note::Note,
     poi::{
         provider::{PoiProvider, PoiProviderError},
         types::{BlindedCommitmentType, PoiStatus},
@@ -118,6 +118,21 @@ pub struct SingleProofReport {
 /// contracts). Only meaningful as the `from` of an `eth_estimateGas` on a dummy-proof transaction.
 pub const VERIFICATION_BYPASS: Address =
     alloy::primitives::address!("0x000000000000000000000000000000000000dEaD");
+
+// Types of the read API, for crates that do not reach into the indexer modules.
+pub use crate::{
+    indexer::{indexed_account::IndexedAccountState, syncer::Operation},
+    note::{
+        sent::SentNote,
+        utxo::{UtxoNote, blinded_commitment},
+    },
+    poi::types::BlindedCommitmentType as CommitmentKind,
+};
+
+fn txid_hex(txid: crate::crypto::railgun_txid::Txid) -> String {
+    let raw: U256 = txid.into();
+    format!("0x{raw:064x}")
+}
 
 /// Interfaces with the RAILGUN protocol.
 pub struct RailgunProvider {
@@ -219,6 +234,80 @@ impl RailgunProvider {
             prover,
             poi_provider,
         })
+    }
+
+    /// Last block the UTXO indexer has been synced to.
+    pub fn synced_block(&self) -> u64 {
+        self.utxo_indexer.synced_block()
+    }
+
+    /// Whether POI support is enabled on this provider.
+    pub fn poi_enabled(&self) -> bool {
+        self.poi_provider.is_some()
+    }
+
+    /// POI list keys this provider proves against (their wire strings), empty when POI is off.
+    pub fn poi_list_keys(&self) -> Vec<String> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| {
+                p.list_keys()
+                    .iter()
+                    .map(crate::poi::provider::list_key_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Full state of a registered account: unspent, spent and sent notes.
+    pub fn account_state(&self, address: RailgunAddress) -> Option<IndexedAccountState> {
+        self.utxo_indexer.account_state(address)
+    }
+
+    /// The account's own on-chain operations as kept by the txid indexer (POI enabled only),
+    /// keyed by railgun txid as `0x` + 64 hex digits.
+    pub fn own_operations(&self) -> Vec<(String, Operation)> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| {
+                p.own_operations()
+                    .into_iter()
+                    .map(|(txid, op)| (txid_hex(txid), op))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// POI status of a blinded commitment on each list (list key wire string, status), read
+    /// from the local list copies: no request names the commitment. Empty when POI is off.
+    /// For an unshield, the blinded commitment is the railgun txid.
+    pub fn poi_status_per_list(&self, blinded_commitment: U256) -> Vec<(String, PoiStatus)> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| {
+                p.status_per_list(blinded_commitment.into())
+                    .into_iter()
+                    .map(|(list, status)| (crate::poi::provider::list_key_string(&list), status))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Summaries of the POI proofs still waiting to be generated and submitted.
+    pub fn poi_pending(&self) -> Vec<crate::poi::PendingPoiSummary> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| p.pending_summaries())
+            .unwrap_or_default()
+    }
+
+    /// Railgun txids (`0x` + 64 hex digits) of past operations whose POI the recovery pass
+    /// found `Valid`.
+    pub fn poi_recovered_valid(&self) -> Vec<String> {
+        self.poi_provider
+            .as_ref()
+            .map(|p| p.recovered_valid().into_iter().map(txid_hex).collect())
+            .unwrap_or_default()
     }
 
     /// Register a signer with the provider. The provider will index and track

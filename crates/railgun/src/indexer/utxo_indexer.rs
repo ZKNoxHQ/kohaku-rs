@@ -123,6 +123,17 @@ impl UtxoIndexer {
             .collect()
     }
 
+    /// Full state (unspent, spent and sent notes) of a registered account.
+    pub fn account_state(
+        &self,
+        address: RailgunAddress,
+    ) -> Option<crate::indexer::indexed_account::IndexedAccountState> {
+        self.accounts
+            .iter()
+            .find(|a| a.address() == address)
+            .map(|a| a.state())
+    }
+
     pub fn registered(&self) -> Vec<RailgunAddress> {
         self.accounts.iter().map(|a| a.address()).collect()
     }
