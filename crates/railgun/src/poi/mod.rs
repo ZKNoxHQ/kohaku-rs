@@ -5,6 +5,7 @@ pub(crate) mod provider;
 pub(crate) mod recovery;
 pub(crate) mod types;
 
+pub use provider::PendingPoiSummary;
 pub use types::PoiStatus;
 
 #[cfg(all(test, native))]

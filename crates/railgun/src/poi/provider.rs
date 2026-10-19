@@ -107,6 +107,18 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Non-sensitive view of a [`PendingPoiEntry`] for UIs.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPoiSummary {
+    pub txid: String,
+    pub utxo_tree_in: u32,
+    pub inputs: usize,
+    pub outputs: usize,
+    pub has_unshield: bool,
+    pub list_keys: Vec<String>,
+}
+
 #[derive(Debug, Error)]
 enum PendingPoiError {
     #[error("POI client error: {0}")]
@@ -230,37 +242,80 @@ impl PoiProvider {
 
     /// Returns the worst-case POI status across all configured list keys.
     ///
+    /// Read entirely from the local list copy, see [`Self::status_per_list`].
+    pub fn status(
+        &self,
+        blinded_commitment: BlindedCommitment,
+        _commitment_type: BlindedCommitmentType,
+    ) -> PoiStatus {
+        self.status_per_list(blinded_commitment)
+            .into_iter()
+            .map(|(_, status)| status)
+            .fold(PoiStatus::Valid, PoiStatus::max)
+    }
+
+    /// POI status of a blinded commitment on each configured list.
+    ///
     /// Read entirely from the local list copy. A commitment in the tree is
     /// `Valid`. One we submitted that has not landed yet is `ProofSubmitted`.
     /// Absence is `Missing` only after this process has copied the list through
     /// its zero leaf. Until then it is `Unavailable`: the list was not observed,
     /// and asking the node about this commitment would name it. A blocked shield
     /// is not queried separately, so once the list is caught up it is `Missing`.
-    pub fn status(
+    pub fn status_per_list(
         &self,
         blinded_commitment: BlindedCommitment,
-        _commitment_type: BlindedCommitmentType,
-    ) -> PoiStatus {
-        let mut worst = PoiStatus::Valid;
-        for list_key in self.list_keys() {
-            let status = if self.lists.contains(&list_key, blinded_commitment) {
-                PoiStatus::Valid
-            } else if self
-                .inner
-                .submitted
-                .get(&list_key)
-                .is_some_and(|set| set.contains(&blinded_commitment))
-            {
-                PoiStatus::ProofSubmitted
-            } else if self.lists.caught_up(&list_key) {
-                PoiStatus::Missing
-            } else {
-                PoiStatus::Unavailable
-            };
-            debug!("POI status for list {list_key}: {status:?}");
-            worst = worst.max(status);
-        }
-        worst
+    ) -> Vec<(ListKey, PoiStatus)> {
+        self.list_keys()
+            .into_iter()
+            .map(|list_key| {
+                let status = if self.lists.contains(&list_key, blinded_commitment) {
+                    PoiStatus::Valid
+                } else if self
+                    .inner
+                    .submitted
+                    .get(&list_key)
+                    .is_some_and(|set| set.contains(&blinded_commitment))
+                {
+                    PoiStatus::ProofSubmitted
+                } else if self.lists.caught_up(&list_key) {
+                    PoiStatus::Missing
+                } else {
+                    PoiStatus::Unavailable
+                };
+                debug!("POI status for list {list_key}: {status:?}");
+                (list_key, status)
+            })
+            .collect()
+    }
+
+    /// Summaries of the POI proofs still waiting to be generated and submitted.
+    pub fn pending_summaries(&self) -> Vec<PendingPoiSummary> {
+        self.inner
+            .pending
+            .iter()
+            .map(|e| PendingPoiSummary {
+                txid: format!("{:?}", e.txid),
+                utxo_tree_in: e.utxo_tree_in,
+                inputs: e.in_notes.len(),
+                outputs: e.out_commitments.len(),
+                has_unshield: e.has_unshield,
+                list_keys: e.list_keys.iter().map(list_key_string).collect(),
+            })
+            .collect()
+    }
+
+    /// Past operations whose POI the recovery pass found `Valid`.
+    pub fn recovered_valid(&self) -> Vec<Txid> {
+        self.inner.recovered_valid.iter().copied().collect()
+    }
+
+    /// Operations of the registered accounts that the txid indexer keeps in full.
+    pub fn own_operations(&self) -> Vec<(Txid, Operation)> {
+        self.txid_indexer
+            .own_ops()
+            .map(|(txid, op)| (*txid, op.clone()))
+            .collect()
     }
 
     fn drop_included_submissions(&mut self) {
@@ -531,6 +586,14 @@ impl PoiProvider {
         self.db.set_poi_provider(&self.inner).await?;
         Ok(())
     }
+}
+
+/// The wire form of a list key: Display renders `ListKey(…)`, the serde string is the key.
+pub(crate) fn list_key_string(key: &ListKey) -> String {
+    serde_json::to_value(key)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| key.to_string())
 }
 
 /// Snapshot of a freshly built operation, enough to prove its POI later.
@@ -963,6 +1026,99 @@ mod submission_control_tests {
             created_at: 0,
         };
         (operation, entry)
+    }
+
+    /// The read API: per-list statuses from the local copy, without folding, and the pending
+    /// queue as summaries. Nothing here asks the node about a commitment.
+    #[tokio::test]
+    async fn read_api_reports_per_list_status_and_pending_work() {
+        let (url, methods, stop, task) = service().await;
+        let db = Store::create();
+        let (operation, entry) = pending_fixture();
+        let lists: Vec<ListKey> = vec!["list-a".into(), "list-b".into()];
+        let mut provider = PoiProvider::new(
+            FIXTURE_CHAIN_ID,
+            db.clone(),
+            Arc::new(FixtureIndexer(operation)),
+            url.clone(),
+            lists.clone(),
+        )
+        .await
+        .unwrap();
+        provider.inner.pending.push(entry.clone());
+        let ours = BlindedCommitment::from(U256::from(77));
+        provider
+            .inner
+            .submitted
+            .insert(lists[0].clone(), [ours].into_iter().collect());
+
+        // Lists not copied yet: nothing is known, nothing is asked.
+        assert!(
+            provider
+                .status_per_list(ours)
+                .iter()
+                .any(|(_, status)| *status == PoiStatus::Unavailable)
+        );
+
+        let rpc = Arc::new(kohaku_eip_1193::alloy::Alloy::new(
+            alloy::providers::ProviderBuilder::new().connect_http(url.parse().unwrap()),
+        ));
+        let chain = crate::chain_config::ChainConfig::sepolia();
+        let utxo = crate::indexer::utxo_indexer::UtxoIndexer::new(
+            db.clone(),
+            Arc::new(EmptyUtxo),
+            Arc::new(crate::merkle_tree::SmartWalletUtxoVerifier::new(
+                chain.railgun_smart_wallet,
+                rpc.clone(),
+            )),
+        )
+        .await
+        .unwrap();
+        let mut runtime = crate::provider::RailgunProvider::new(
+            chain,
+            rpc,
+            utxo,
+            Groth16Prover::new(),
+            Some(provider),
+        )
+        .await
+        .unwrap();
+        timeout(
+            Duration::from_secs(10),
+            runtime.sync_to_without_poi_submission(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Submitted on list A, absent from caught-up list B: kept apart per list.
+        let per_list = runtime.poi_status_per_list(ours.into());
+        assert_eq!(
+            per_list,
+            vec![
+                ("list-a".to_string(), PoiStatus::ProofSubmitted),
+                ("list-b".to_string(), PoiStatus::Missing),
+            ]
+        );
+        assert_eq!(runtime.poi_list_keys(), vec!["list-a", "list-b"]);
+
+        let pending = runtime.poi_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].inputs, 1);
+        assert_eq!(pending[0].outputs, 1);
+        assert!(!pending[0].has_unshield);
+        assert_eq!(pending[0].list_keys, vec!["public-fixture-list"]);
+
+        // Only list pages and txid reads went out.
+        assert!(
+            methods
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|m| m != "ppoi_pois_per_list" && m != "ppoi_merkle_proofs")
+        );
+        stop.send(()).unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]

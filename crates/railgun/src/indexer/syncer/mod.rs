@@ -83,7 +83,7 @@ pub struct LegacyCommitment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Operation {
+pub struct Operation {
     pub block_number: u64,
     pub nullifiers: Vec<U256>,
     pub commitment_hashes: Vec<U256>,
