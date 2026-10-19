@@ -72,7 +72,10 @@ impl UtxoNote {
         let viewing_pubkey = signer.viewing_key().public_key();
         let nullifying_key = signer.viewing_key().nullifying_key();
         let nullifier = poseidon_hash(&[nullifying_key.to_u256(), U256::from(leaf_index)]).unwrap();
-        let npk = note_public_key(spending_pubkey, nullifying_key, &random);
+        // Through the signer's master key rather than rebuilt from its spending public key: equal
+        // for a full signer (the trait default), and correct for a view-only signer that knows
+        // the master key from the 0zk address but not the spending public key.
+        let npk = note_public_key(signer.master_public_key(), &random);
         let hash = note_hash(npk, asset, value);
         let blinded_commitment = blinded_commitment(hash.into(), npk, tree_number, leaf_index);
 
@@ -212,13 +215,8 @@ fn note_hash(note_public_key: U256, asset: AssetId, value: u128) -> UtxoLeafHash
         .into()
 }
 
-fn note_public_key(
-    spending_pubkey: SpendingPublicKey,
-    nullifying_key: NullifyingKey,
-    random: &[u8; 16],
-) -> U256 {
-    let master_key = MasterPublicKey::new(spending_pubkey, nullifying_key);
-
+/// `npk = poseidon(masterPublicKey, random)`.
+fn note_public_key(master_key: MasterPublicKey, random: &[u8; 16]) -> U256 {
     poseidon_hash(&[master_key.to_u256(), U256::from_be_slice(random)]).unwrap()
 }
 
@@ -306,5 +304,82 @@ mod tests {
         let pub_key = note.note_public_key;
 
         insta::assert_debug_snapshot!(pub_key);
+    }
+
+    /// A signer that knows the viewing key and the master public key (as decoded from a 0zk
+    /// address) but not the spending public key: it returns an unrelated one.
+    struct ViewOnlySigner {
+        viewing: crate::crypto::keys::ViewingKey,
+        master: MasterPublicKey,
+        placeholder: SpendingPublicKey,
+    }
+
+    #[async_trait::async_trait]
+    impl RailgunSigner for ViewOnlySigner {
+        fn chain_id(&self) -> crate::account::chain::ChainId {
+            crate::account::chain::ChainId::evm(1)
+        }
+        fn viewing_key(&self) -> crate::crypto::keys::ViewingKey {
+            self.viewing
+        }
+        fn spending_public_key(&self) -> SpendingPublicKey {
+            self.placeholder
+        }
+        fn master_public_key(&self) -> MasterPublicKey {
+            self.master
+        }
+        async fn sign(
+            &self,
+            _inputs: U256,
+        ) -> Result<
+            crate::crypto::keys::SpendingSignature,
+            crate::account::signer::RailgunSignerError,
+        > {
+            Err(crate::account::signer::RailgunSignerError::new("view-only"))
+        }
+    }
+
+    /// A view-only signer rebuilds the same note as the full signer: note public key, hash,
+    /// blinded commitment and nullifier only depend on the master key and the viewing key.
+    #[test]
+    fn view_only_signer_rebuilds_the_same_note() {
+        use crate::{
+            account::signer::PrivateKeySigner,
+            crypto::keys::{SpendingKey, ViewingKey},
+        };
+
+        let full = PrivateKeySigner::new_evm(
+            SpendingKey::from_bytes([1u8; 32]),
+            ViewingKey::from_bytes([2u8; 32]),
+            1,
+        );
+        let view_only: Arc<dyn RailgunSigner> = Arc::new(ViewOnlySigner {
+            viewing: full.viewing_key(),
+            master: full.master_public_key(),
+            placeholder: SpendingKey::from_bytes([9u8; 32]).public_key(),
+        });
+        assert_ne!(view_only.spending_public_key(), full.spending_public_key());
+        assert_eq!(view_only.address(), full.address());
+
+        let asset = AssetId::Erc20(alloy::primitives::address!(
+            "0x1234567890123456789012345678901234567890"
+        ));
+        let build = |signer: Arc<dyn RailgunSigner>| {
+            UtxoNote::new(
+                1,
+                7,
+                signer,
+                asset,
+                100,
+                [3u8; 16],
+                "",
+                BlindedCommitmentType::Transact,
+            )
+        };
+        let (a, b) = (build(full), build(view_only));
+        assert_eq!(a.note_public_key, b.note_public_key);
+        assert_eq!(a.hash, b.hash);
+        assert_eq!(a.blinded_commitment, b.blinded_commitment);
+        assert_eq!(a.nullifier, b.nullifier);
     }
 }
