@@ -28,7 +28,7 @@ use crate::{
     note::Note,
     poi::{
         provider::{PoiProvider, PoiProviderError},
-        types::{BlindedCommitmentType, PoiStatus},
+        types::{BlindedCommitmentType, ListKey, OperationPoi, PoiStatus},
     },
     transact::{
         ShieldBuilder, TransactionBuilder, TransactionBuilderError,
@@ -215,6 +215,8 @@ pub enum RailgunProviderError {
     },
     #[error("Privacy Paymaster not configured for chain: {0}")]
     PrivacyPaymasterNotConfigured(u64),
+    #[error("POI is not enabled on this provider")]
+    PoiDisabled,
     #[error("Other: {0}")]
     Other(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -467,6 +469,25 @@ impl RailgunProvider {
             .await;
         let operations = spendable.explain(built)?;
         Ok(ProvedTx::new(self.chain.railgun_smart_wallet, operations))
+    }
+
+    /// Proves the POI of a built operation for every list key, with its outputs at
+    /// `utxo_tree_out` and `txid_proof` as the inclusion proof of its txid leaf. For a
+    /// pre-transaction POI, pass [`UtxoTreeIndex::pre_inclusion`] and a proof of the leaf
+    /// `TxidLeafHash::new(Txid::from_operation(op), op.inner.utxo_tree_number, pre_inclusion)`.
+    /// Fails when POI is not enabled.
+    pub async fn prove_operation_pois(
+        &self,
+        operation: &ProvedOperation,
+        utxo_tree_out: crate::merkle_tree::UtxoTreeIndex,
+        txid_proof: crate::merkle_tree::MerkleProof,
+    ) -> Result<Vec<(ListKey, OperationPoi)>, RailgunProviderError> {
+        let Some(poi_provider) = &self.poi_provider else {
+            return Err(RailgunProviderError::PoiDisabled);
+        };
+        Ok(poi_provider
+            .prove_operation_pois(&self.prover, operation, utxo_tree_out, txid_proof)
+            .await?)
     }
 
     /// Build a transaction builder into a proved, signable transaction.

@@ -19,7 +19,7 @@ use std::{
     sync::Arc,
 };
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, B256, U256};
 use rand::{CryptoRng, RngExt};
 use thiserror::Error;
 use tracing::info;
@@ -45,6 +45,10 @@ use crate::{
     transact::proved_transaction::ProvedOperation,
 };
 
+/// Derives the adapt params from the nullifiers of the built operations, one list per
+/// operation in transaction order. See [`TransactionBuilder::adapt_with`].
+pub type AdaptParamsFn = Arc<dyn Fn(&[Vec<B256>]) -> [u8; 32] + Send + Sync>;
+
 /// Basic builder for constructing railgun transactions. Transactions are sets
 /// of shielded operations (transfers and unshield) that are proved together
 /// and can be executed in a single on-chain transaction.
@@ -58,6 +62,9 @@ pub struct TransactionBuilder {
 
     adapt_contract: Option<Address>,
     adapt_params: Option<[u8; 32]>,
+    /// Adapt contract with params derived from the built operations, see [`Self::adapt_with`].
+    adapt_with: Option<(Address, AdaptParamsFn)>,
+    min_gas_price: u128,
 }
 
 #[derive(Debug, Error)]
@@ -75,6 +82,14 @@ pub enum TransactionBuilderError {
         asset: AssetId,
         value: u128,
     },
+    #[error("adapt() and adapt_with() both set the adapt contract; use one of them")]
+    ConflictingAdapt,
+    #[error("A transaction can only carry one broadcaster fee")]
+    MultipleBroadcasterFees,
+    #[error(
+        "The broadcaster fee of {value} cannot be paid from a single UTXO tree, it must be one note"
+    )]
+    BroadcasterFeeSplit { value: u128 },
     #[error("Encryption error: {0}")]
     Encryption(#[from] EncryptError),
     #[error("Prover error: {0}")]
@@ -95,6 +110,8 @@ struct Intent {
     pub asset: AssetId,
     pub value: u128,
     pub kind: IntentKind,
+    /// The note of this intent must be the first commitment of the first operation.
+    pub pinned_first: bool,
 }
 
 #[derive(Clone)]
@@ -110,6 +127,8 @@ impl TransactionBuilder {
             unshields: HashSet::new(),
             adapt_contract: None,
             adapt_params: None,
+            adapt_with: None,
+            min_gas_price: 0,
         }
     }
 }
@@ -132,7 +151,45 @@ impl TransactionBuilder {
                 to,
                 memo: memo.to_string(),
             },
+            pinned_first: false,
         });
+        self
+    }
+
+    /// Adds the fee note of a Railgun broadcaster.
+    ///
+    /// Broadcasters only look at `transactions[0].commitments[0]`, so unlike [`Self::transfer`]
+    /// this note is guaranteed to come first whatever the other intents are. The fee has to fit
+    /// in the notes of a single UTXO tree.
+    pub fn broadcaster_fee(
+        mut self,
+        from: Arc<dyn RailgunSigner>,
+        to: RailgunAddress,
+        asset: AssetId,
+        value: u128,
+    ) -> Result<Self, TransactionBuilderError> {
+        if self.intents.iter().any(|i| i.pinned_first) {
+            return Err(TransactionBuilderError::MultipleBroadcasterFees);
+        }
+        self.intents.push(Intent {
+            from,
+            asset,
+            value,
+            kind: IntentKind::Transfer {
+                to,
+                memo: String::new(),
+            },
+            pinned_first: true,
+        });
+        Ok(self)
+    }
+
+    /// Sets `BoundParams.minGasPrice`. The Railgun contract rejects the transaction when
+    /// `tx.gasprice` is lower, which is how a broadcaster is held to the price the fee was
+    /// computed for. Leave at 0 (the default) for any other submitter, in particular ERC-4337
+    /// bundlers, whose gas price is not known when the proof is made.
+    pub fn min_gas_price(mut self, wei: u128) -> Self {
+        self.min_gas_price = wei;
         self
     }
 
@@ -157,6 +214,7 @@ impl TransactionBuilder {
             asset,
             value,
             kind: IntentKind::Unshield { to },
+            pinned_first: false,
         });
         Ok(self)
     }
@@ -165,6 +223,21 @@ impl TransactionBuilder {
     pub fn adapt(mut self, contract: Address, params: [u8; 32]) -> Self {
         self.adapt_contract = Some(contract);
         self.adapt_params = Some(params);
+        self
+    }
+
+    /// Sets the adapt contract, with adapt params computed from the nullifiers of the
+    /// operations once their input notes are chosen, before proving.
+    ///
+    /// For adapt contracts that bind the transaction they run in, such as Railgun's RelayAdapt
+    /// (`adaptParams = keccak256(abi.encode(nullifiers, transactions.length, actionData))`):
+    /// the nullifiers are only known at build time, so [`Self::adapt`] cannot be used there.
+    pub fn adapt_with(
+        mut self,
+        contract: Address,
+        params: impl Fn(&[Vec<B256>]) -> [u8; 32] + Send + Sync + 'static,
+    ) -> Self {
+        self.adapt_with = Some((contract, Arc::new(params)));
         self
     }
 
@@ -207,9 +280,26 @@ impl TransactionBuilder {
         let groups = self.group_intents();
         let mut operations = build_groups(in_notes, groups, rng)?;
 
+        let (adapt_contract, adapt_params) = match &self.adapt_with {
+            Some((contract, params)) => {
+                if self.adapt_contract.is_some() || self.adapt_params.is_some() {
+                    return Err(TransactionBuilderError::ConflictingAdapt);
+                }
+                // Nullifiers are fixed once the input notes are chosen, before proving, so the
+                // params bound here are exactly what the adapt contract can recompute on-chain.
+                let nullifiers: Vec<Vec<B256>> = operations
+                    .iter()
+                    .map(|op| op.in_notes().iter().map(|n| n.nullifier.into()).collect())
+                    .collect();
+                (Some(*contract), Some(params(&nullifiers)))
+            }
+            None => (self.adapt_contract, self.adapt_params),
+        };
+
         for op in &mut operations {
-            op.adapt_contract = self.adapt_contract;
-            op.adapt_params = self.adapt_params;
+            op.adapt_contract = adapt_contract;
+            op.adapt_params = adapt_params;
+            op.min_gas_price = self.min_gas_price;
             op.verify()?;
         }
         Ok(operations)
@@ -241,8 +331,14 @@ fn build_groups(
 ) -> Result<Vec<Operation>, TransactionBuilderError> {
     let mut operations = Vec::new();
     for ((from, asset), intents) in groups {
+        let pinned = intents.iter().any(|i| i.pinned_first);
         let ops = build_group(in_notes, from, asset, intents, rng)?;
-        operations.extend(ops);
+        if pinned {
+            // The group paying the broadcaster fee goes first, its fee operation leading.
+            operations.splice(0..0, ops);
+        } else {
+            operations.extend(ops);
+        }
     }
     Ok(operations)
 }
@@ -257,7 +353,10 @@ fn build_group(
 ) -> Result<Vec<Operation>, TransactionBuilderError> {
     // Sort intents smallest to largest. Helps to ensure small intents don't
     // ever need to span across multiple trees.
-    intents.sort_by(|a, b| a.value.cmp(&b.value));
+    // A pinned intent (broadcaster fee) goes first so its note is the first commitment. The sort
+    // is stable and the key is constant without a pinned intent, so the default order is
+    // unchanged.
+    intents.sort_by(|a, b| (!a.pinned_first, a.value).cmp(&(!b.pinned_first, b.value)));
 
     // Filter notes for this asset and signer, and group by tree number.
     let tree_number = in_notes
@@ -278,6 +377,7 @@ fn build_group(
 
     // Fit intents to trees.
     let mut operations = BTreeMap::new();
+    let mut pinned_tree = None;
     for intent in intents {
         //? Try single tree first (oldest sufficient).
         let single = balances
@@ -287,8 +387,17 @@ fn build_group(
 
         if let Some(tree) = single {
             *balances.get_mut(&tree).unwrap() -= intent.value;
+            if intent.pinned_first {
+                pinned_tree = Some(tree);
+            }
             insert_operation(&mut operations, tree, intent, rng);
             continue;
+        }
+
+        if intent.pinned_first {
+            return Err(TransactionBuilderError::BroadcasterFeeSplit {
+                value: intent.value,
+            });
         }
 
         split_intent(from, asset, intent, &mut balances, &mut operations, rng)?;
@@ -308,7 +417,12 @@ fn build_group(
         add_change_note(op, asset, rng);
     }
 
-    Ok(operations.into_values().collect())
+    let mut operations: Vec<Operation> = operations.into_values().collect();
+    if let Some(tree) = pinned_tree {
+        // Stable: only the operation holding the pinned note moves, to the front.
+        operations.sort_by_key(|op| op.utxo_tree_number != tree);
+    }
+    Ok(operations)
 }
 
 /// Helper for fitting an intent to multiple trees when it can't fit on a single tree.
@@ -454,11 +568,11 @@ async fn prove_operation(
         .map(|n| n.encrypt(rng))
         .collect::<Result<_, _>>()?;
 
-    //? min_gas_price, adapt_contract, and adapt_input are all vestigial fields for
-    //? railgun relayers.
+    //? min_gas_price, adapt_contract and adapt_params are bound into the proof and checked by
+    //? the Railgun contract (`tx.gasprice >= minGasPrice`, `adaptContract == msg.sender`).
     let bound_params = abis::railgun::BoundParams::new(
         utxo_tree.number() as u16,
-        0,
+        operation.min_gas_price,
         unshield_type,
         chain_id,
         operation.adapt_contract.unwrap_or(Address::ZERO),
@@ -630,5 +744,174 @@ mod tests {
         assert_eq!(tx.nullifiers.len(), 1);
         assert_eq!(tx.commitments.len(), 2);
         assert_eq!(tx.boundParams.commitmentCiphertext.len(), 2);
+    }
+
+    /// Without a pinned intent the layout is the historical one: groups in `(address, asset)`
+    /// order, notes by ascending value, change last. The ERC-4337 path relies on nothing else,
+    /// but it must not move when the broadcaster features are unused.
+    #[test]
+    fn default_layout_is_unchanged() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let notes = [note(&me, 0, 0, WETH, 100)];
+
+        let builder = TransactionBuilder::new()
+            .transfer(me.clone(), other.address(), WETH, 30, "")
+            .transfer(me.clone(), other.address(), WETH, 10, "fee")
+            .transfer(me.clone(), other.address(), WETH, 20, "");
+        let ops = builder.operations(&notes, &mut rand::rng()).unwrap();
+
+        assert_eq!(ops.len(), 1);
+        assert_eq!(out_values(&ops[0]), vec![10, 20, 30, 40]);
+        assert_eq!(ops[0].min_gas_price, 0);
+    }
+
+    #[test]
+    fn broadcaster_fee_is_first_commitment_of_first_operation() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let broadcaster = PrivateKeySigner::new_evm(random(), random(), 1);
+        let notes = [note(&me, 0, 0, WETH, 100), note(&me, 0, 1, USDC, 1_000)];
+
+        // USDC sorts before WETH in the group map and 5 < 25: both orderings would bury the fee.
+        assert!(USDC < WETH);
+        let builder = TransactionBuilder::new()
+            .transfer(me.clone(), other.address(), USDC, 500, "")
+            .transfer(me.clone(), other.address(), WETH, 5, "")
+            .broadcaster_fee(me.clone(), broadcaster.address(), WETH, 25)
+            .unwrap()
+            .min_gas_price(7);
+        let ops = builder.operations(&notes, &mut rand::rng()).unwrap();
+
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].asset, WETH);
+        assert_eq!(out_values(&ops[0]), vec![25, 5, 70]);
+        assert_eq!(ops[1].asset, USDC);
+        assert!(ops.iter().all(|op| op.min_gas_price == 7));
+    }
+
+    #[test]
+    fn broadcaster_fee_moves_its_tree_operation_first() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let broadcaster = PrivateKeySigner::new_evm(random(), random(), 1);
+        // Tree 0 cannot pay the fee, tree 1 can: the fee operation is the tree 1 one.
+        let notes = [note(&me, 0, 0, WETH, 10), note(&me, 1, 0, WETH, 100)];
+
+        let builder = TransactionBuilder::new()
+            .transfer(me.clone(), other.address(), WETH, 8, "")
+            .broadcaster_fee(me.clone(), broadcaster.address(), WETH, 25)
+            .unwrap();
+        let ops = builder.operations(&notes, &mut rand::rng()).unwrap();
+
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].utxo_tree_number, 1);
+        assert_eq!(out_values(&ops[0])[0], 25);
+    }
+
+    #[test]
+    fn broadcaster_fee_rules() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let broadcaster = PrivateKeySigner::new_evm(random(), random(), 1);
+
+        let twice = TransactionBuilder::new()
+            .broadcaster_fee(me.clone(), broadcaster.address(), WETH, 1)
+            .unwrap()
+            .broadcaster_fee(me.clone(), broadcaster.address(), WETH, 1);
+        assert!(matches!(
+            twice,
+            Err(TransactionBuilderError::MultipleBroadcasterFees)
+        ));
+
+        // 15 is only reachable by combining two trees: refused, the fee must be one note.
+        let notes = [note(&me, 0, 0, WETH, 10), note(&me, 1, 0, WETH, 10)];
+        let split = TransactionBuilder::new()
+            .broadcaster_fee(me.clone(), broadcaster.address(), WETH, 15)
+            .unwrap()
+            .operations(&notes, &mut rand::rng());
+        assert!(matches!(
+            split,
+            Err(TransactionBuilderError::BroadcasterFeeSplit { value: 15 })
+        ));
+    }
+
+    /// `minGasPrice` is part of the proven bound params: 0 by default, and the dummy build has
+    /// the calldata shape of a real one with an all-zero proof.
+    #[test]
+    fn min_gas_price_is_bound_and_dummy_proof_is_zero() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let notes = [note(&me, 0, 0, WETH, 100)];
+        let trees = tree_with(&notes, 0);
+
+        let base = TransactionBuilder::new().transfer(me.clone(), other.address(), WETH, 30, "");
+        let default = block_on(
+            base.clone()
+                .build_dummy(1, &notes, &trees, &mut rand::rng()),
+        )
+        .unwrap();
+        let priced = block_on(base.min_gas_price(1_000_000_000).build_dummy(
+            1,
+            &notes,
+            &trees,
+            &mut rand::rng(),
+        ))
+        .unwrap();
+
+        let tx = &default[0].transaction;
+        assert_eq!(tx.boundParams.minGasPrice.to::<u128>(), 0);
+        assert_eq!(
+            priced[0].transaction.boundParams.minGasPrice.to::<u128>(),
+            1_000_000_000
+        );
+        assert_eq!(tx.proof.a.x, U256::ZERO);
+        assert_eq!(tx.proof.b.x, [U256::ZERO; 2]);
+        assert_eq!(tx.nullifiers.len(), 1);
+        assert_eq!(tx.commitments.len(), 2);
+        assert_eq!(tx.boundParams.commitmentCiphertext.len(), 2);
+    }
+
+    fn out_values(op: &Operation) -> Vec<u128> {
+        op.out_notes().iter().map(|n| n.value()).collect()
+    }
+
+    /// `adapt_with`: the params are computed from the nullifiers of the operations actually
+    /// built and bound into each of them; combining it with `adapt()` is refused.
+    #[test]
+    fn adapt_with_binds_params_derived_from_the_built_nullifiers() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let contract = address!("0x7e3d929EbD5bDC84d02Bd3205c777578f33A214D");
+        let notes = [note(&me, 0, 0, WETH, 100), note(&me, 0, 1, WETH, 50)];
+        let derive =
+            |nullifiers: &[Vec<B256>]| alloy::primitives::keccak256(nullifiers.concat().concat()).0;
+
+        let builder = TransactionBuilder::new()
+            .unshield(me.clone(), contract, WETH, 120)
+            .unwrap()
+            .transfer(me.clone(), other.address(), WETH, 5, "")
+            .adapt_with(contract, derive);
+        let ops = builder.operations(&notes, &mut rand::rng()).unwrap();
+
+        let nullifiers: Vec<Vec<B256>> = ops
+            .iter()
+            .map(|op| op.in_notes().iter().map(|n| n.nullifier.into()).collect())
+            .collect();
+        assert_eq!(nullifiers[0].len(), 2);
+        for op in &ops {
+            assert_eq!(op.adapt_contract, Some(contract));
+            assert_eq!(op.adapt_params, Some(derive(&nullifiers)));
+        }
+
+        let both = TransactionBuilder::new()
+            .unshield(me.clone(), contract, WETH, 10)
+            .unwrap()
+            .adapt(contract, [0u8; 32])
+            .adapt_with(contract, derive)
+            .operations(&notes, &mut rand::rng());
+        assert!(matches!(
+            both,
+            Err(TransactionBuilderError::ConflictingAdapt)
+        ));
     }
 }

@@ -6,7 +6,7 @@ pub(crate) mod recovery;
 pub(crate) mod types;
 
 pub use provider::PendingPoiSummary;
-pub use types::PoiStatus;
+pub use types::{BlindedCommitment, ListKey, OperationPoi, PoiStatus};
 
 #[cfg(all(test, native))]
 mod conformance_tests;

@@ -23,14 +23,17 @@ use crate::{
         syncer::{Operation, TxidSyncer},
         txid_indexer::{TxidIndexer, TxidIndexerError},
     },
-    merkle_tree::{TOTAL_LEAVES, TxidMerkleTree, UtxoTreeIndex},
+    merkle_tree::{MerkleProof, TOTAL_LEAVES, TxidMerkleTree, UtxoTreeIndex},
     note::utxo::{self, UtxoNote},
     poi::{
         client::{PoiClient, PoiClientError, PoiNodeClient},
         lists::{PoiLists, PoiSyncError},
         note::PoiNote,
         recovery::RecoveryAccount,
-        types::{BlindedCommitment, BlindedCommitmentType, ListKey, PoiStatus, TransactProofData},
+        types::{
+            BlindedCommitment, BlindedCommitmentType, ListKey, OperationPoi, PoiStatus,
+            TransactProofData,
+        },
     },
     railgun_database::{DatabaseError, RailgunDB},
     transact::proved_transaction::ProvedOperation,
@@ -67,6 +70,8 @@ pub enum PoiProviderError {
     Database(#[from] DatabaseError),
     #[error("POI list sync failed: {0}")]
     Sync(#[from] PoiSyncError),
+    #[error("POI proof error: {0}")]
+    Prove(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Serializable snapshot needed to re-prove and submit a post-transaction POI
@@ -451,6 +456,76 @@ impl PoiProvider {
             op.circuit_inputs.bound_params_hash
         );
         self.inner.pending.push(entry_from_op(op, list_keys));
+    }
+
+    /// Proves the POI of a built operation for every list key, with its outputs at
+    /// `utxo_tree_out` and `txid_proof` as the inclusion proof of its txid leaf. The input notes'
+    /// POI proofs come from the local list copy.
+    ///
+    /// Post-transaction POIs are this circuit at the operation's real position with a proof
+    /// from the txid tree. A pre-transaction POI, which Railgun broadcasters require before
+    /// relaying, uses [`UtxoTreeIndex::pre_inclusion`] and a proof built by the caller, since
+    /// the txid is in no tree yet.
+    pub async fn prove_operation_pois(
+        &self,
+        prover: &Groth16Prover,
+        operation: &ProvedOperation,
+        utxo_tree_out: UtxoTreeIndex,
+        txid_proof: MerkleProof,
+    ) -> Result<Vec<(ListKey, OperationPoi)>, PoiProviderError> {
+        let list_keys = self.poi_client.list_keys();
+        let entry = entry_from_op(operation, list_keys.clone());
+        let (tree_out, index_out) = utxo_tree_out.position();
+        let mut result = Vec::with_capacity(list_keys.len());
+
+        for list_key in list_keys {
+            let mut in_notes = Vec::new();
+            for note in entry.in_notes.clone() {
+                let commitment = note.blinded_commitment.into();
+                let proof = self
+                    .lists
+                    .proof(&list_key, commitment)
+                    .ok_or_else(|| PoiProviderError::ProofNotFound(commitment, list_key.clone()))?;
+                in_notes.push(PoiNote::new(
+                    note,
+                    HashMap::from([(list_key.clone(), proof)]),
+                ));
+            }
+
+            let inputs = PoiCircuitInputs::from_inputs_with_txid_proof(
+                entry.spending_pubkey,
+                entry.nullifying_key,
+                entry.utxo_tree_in,
+                entry.bound_params_hash,
+                &in_notes,
+                &entry.out_commitments,
+                &entry.out_npks,
+                &entry.out_values,
+                entry.token_hash,
+                entry.has_unshield,
+                list_key.clone(),
+                utxo_tree_out,
+                txid_proof.clone(),
+            )
+            .map_err(|e| PoiProviderError::Prove(Box::new(e)))?;
+
+            let proof = prover
+                .prove_poi(&inputs)
+                .await
+                .map_err(|e| PoiProviderError::Prove(Box::new(e)))?;
+
+            result.push((
+                list_key,
+                OperationPoi {
+                    proof,
+                    txid_merkleroot: inputs.railgun_txid_merkleroot_after_transaction,
+                    poi_merkleroots: inputs.poi_merkleroots,
+                    blinded_commitments_out: blinded_commitments(&entry, tree_out, index_out),
+                    railgun_txid_if_has_unshield: inputs.railgun_txid_if_has_unshield,
+                },
+            ));
+        }
+        Ok(result)
     }
 
     async fn submit_pending(&mut self, prover: &Groth16Prover) {

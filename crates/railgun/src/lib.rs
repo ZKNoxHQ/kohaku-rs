@@ -10,7 +10,7 @@ mod circuit;
 mod common;
 pub mod crypto;
 pub mod indexer;
-mod merkle_tree;
+pub mod merkle_tree;
 mod note;
 pub mod poi;
 pub mod provider;
@@ -20,6 +20,7 @@ pub mod transact;
 #[cfg(all(test, native))]
 mod interop_tests;
 
+pub use circuit::proof::Proof;
 pub use common::MaybeSend;
 
 #[cfg(all(wasm, parallel))]
