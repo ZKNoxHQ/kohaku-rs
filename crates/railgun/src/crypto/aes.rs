@@ -41,6 +41,16 @@ pub(super) fn encrypt_gcm(
     key: &[u8; 32],
     iv: &[u8; 16],
 ) -> Result<Ciphertext, AesError> {
+    encrypt_gcm_aad(plaintext, key, iv, &[])
+}
+
+/// AES-256-GCM over the concatenated blocks, with associated data.
+pub(crate) fn encrypt_gcm_aad(
+    plaintext: &[&[u8]],
+    key: &[u8; 32],
+    iv: &[u8; 16],
+    aad: &[u8],
+) -> Result<Ciphertext, AesError> {
     //? Safe to unwrap as key length is fixed
     let cipher = Aes256GcmU16::new_from_slice(key).unwrap();
     let nonce = Nonce::<U16>::from_slice(iv);
@@ -57,7 +67,7 @@ pub(super) fn encrypt_gcm(
             nonce,
             Payload {
                 msg: &combined,
-                aad: &[],
+                aad,
             },
         )
         .map_err(AesError::Gcm)?;
@@ -83,6 +93,15 @@ pub(super) fn decrypt_gcm(
     ciphertext: &Ciphertext,
     key: &[u8; 32],
 ) -> Result<Vec<Vec<u8>>, AesError> {
+    decrypt_gcm_aad(ciphertext, key, &[])
+}
+
+/// Inverse of [`encrypt_gcm_aad`]: the blocks come back with the lengths of the ciphertext's.
+pub(crate) fn decrypt_gcm_aad(
+    ciphertext: &Ciphertext,
+    key: &[u8; 32],
+    aad: &[u8],
+) -> Result<Vec<Vec<u8>>, AesError> {
     //? Safe to unwrap as key length is fixed
     let cipher = Aes256GcmU16::new_from_slice(key).unwrap();
     let nonce = Nonce::<U16>::from_slice(&ciphertext.iv);
@@ -98,7 +117,7 @@ pub(super) fn decrypt_gcm(
             nonce,
             Payload {
                 msg: &combined,
-                aad: &[],
+                aad,
             },
         )
         .map_err(AesError::Decrypt)?;
