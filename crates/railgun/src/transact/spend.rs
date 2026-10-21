@@ -21,7 +21,7 @@ use crate::{
     merkle_tree::UtxoMerkleTree,
     note::{
         Note,
-        encrypt::EncryptError,
+        encrypt::{EncryptError, NoteEncryption},
         operation::{Operation, OperationVerificationError},
         transfer::TransferNote,
         unshield::UnshieldNote,
@@ -46,6 +46,9 @@ pub struct Spend {
     finalized: bool,
     adapt_contract: Option<Address>,
     adapt_params: Option<[u8; 32]>,
+    /// The change note goes back to its signer under [`NoteEncryption::HybridPq`] with its own
+    /// KEM key, see [`Self::with_hybrid_change`].
+    hybrid_change: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +56,7 @@ struct PendingTransfer {
     to: RailgunAddress,
     value: u128,
     memo: String,
+    encryption: NoteEncryption,
 }
 
 #[derive(Debug, Error)]
@@ -90,6 +94,8 @@ pub enum SpendError {
     TransactCircuitInput(#[from] TransactCircuitInputsError),
     #[error("Operation verification error: {0}")]
     OperationVerification(#[from] OperationVerificationError),
+    #[error("A hybrid change note was requested, but the signer of {from} has no ML-KEM key")]
+    ChangeNeedsKemKey { from: RailgunAddress },
 }
 
 impl Spend {
@@ -128,23 +134,43 @@ impl Spend {
             finalized: false,
             adapt_contract: None,
             adapt_params: None,
+            hybrid_change: false,
         })
     }
 
-    /// Spend `value` of this spend's asset to another Railgun address.
-    pub fn transfer(
+    /// Spend `value` of this spend's asset to another Railgun address, encrypted the way
+    /// every Railgun wallet reads ([`NoteEncryption::Legacy`]).
+    pub fn transfer(self, to: RailgunAddress, value: u128, memo: &str) -> Result<Self, SpendError> {
+        self.transfer_with_encryption(to, value, memo, NoteEncryption::Legacy)
+    }
+
+    /// Spend `value` of this spend's asset to another Railgun address, with the note encrypted
+    /// by `encryption`, for instance [`NoteEncryption::HybridPq`] with the receiver's published
+    /// KEM key.
+    pub fn transfer_with_encryption(
         mut self,
         to: RailgunAddress,
         value: u128,
         memo: &str,
+        encryption: NoteEncryption,
     ) -> Result<Self, SpendError> {
         self.ensure_open()?;
         self.pending.push(PendingTransfer {
             to,
             value,
             memo: memo.to_string(),
+            encryption,
         });
         Ok(self)
+    }
+
+    /// Encrypts the change note with [`NoteEncryption::HybridPq`] to the signer's own KEM
+    /// key. Building fails if the signer has none: the choice is never downgraded silently. Off
+    /// by default, so that wallets without the key (and legacy wallets on the same seed) keep
+    /// seeing the change.
+    pub fn with_hybrid_change(mut self) -> Self {
+        self.hybrid_change = true;
+        self
     }
 
     /// Unshield `value` of this spend's asset to an external address.
@@ -183,14 +209,17 @@ impl Spend {
         let asset = self.asset();
         let viewing = self.signer.viewing_key();
         for pending in self.pending.drain(..) {
-            self.outputs.push(TransferNote::new(
-                viewing,
-                pending.to,
-                asset,
-                pending.value,
-                rng.random(),
-                &pending.memo,
-            ));
+            self.outputs.push(
+                TransferNote::new(
+                    viewing,
+                    pending.to,
+                    asset,
+                    pending.value,
+                    rng.random(),
+                    &pending.memo,
+                )
+                .with_encryption(pending.encryption),
+            );
         }
         self.rebuild_change(rng)?;
         self.finalized = true;
@@ -227,21 +256,21 @@ impl Spend {
         self.signer.clone()
     }
 
+    /// A spend over already selected inputs, balanced by a change note to the signer.
     pub(crate) fn from_selected(
         signer: Arc<dyn RailgunSigner>,
         inputs: Vec<UtxoNote>,
         outputs: Vec<TransferNote>,
         unshield: Option<UnshieldNote>,
-        change: Option<TransferNote>,
         adapt: Option<(Address, [u8; 32])>,
+        hybrid_change: bool,
+        rng: &mut impl CryptoRng,
     ) -> Result<Self, SpendError> {
         let mut spend = Self::try_new(signer, inputs)?;
-        if let Some(change) = &change {
-            spend.change_to = change.to;
-        }
         spend.outputs = outputs;
         spend.unshield = unshield;
-        spend.change = change;
+        spend.hybrid_change = hybrid_change;
+        spend.rebuild_change(rng)?;
         spend.finalized = true;
         if let Some((contract, params)) = adapt {
             spend.adapt_contract = Some(contract);
@@ -249,6 +278,10 @@ impl Spend {
         }
         spend.clone().into_operation()?;
         Ok(spend)
+    }
+
+    pub(crate) fn hybrid_change(&self) -> bool {
+        self.hybrid_change
     }
 
     pub(crate) fn set_adapt(&mut self, contract: Address, params: [u8; 32]) {
@@ -337,14 +370,29 @@ impl Spend {
         }
         let change = inputs - outputs;
         self.change = if change > 0 {
-            Some(TransferNote::new(
-                self.signer.viewing_key(),
-                self.change_to,
-                self.asset(),
-                change,
-                rng.random(),
-                "change",
-            ))
+            let encryption = if self.hybrid_change {
+                let Some(kem) = self.signer.kem_key_pair() else {
+                    return Err(SpendError::ChangeNeedsKemKey {
+                        from: self.signer.address(),
+                    });
+                };
+                NoteEncryption::HybridPq {
+                    receiver_kem_key: kem.encapsulation_key().clone(),
+                }
+            } else {
+                NoteEncryption::Legacy
+            };
+            Some(
+                TransferNote::new(
+                    self.signer.viewing_key(),
+                    self.change_to,
+                    self.asset(),
+                    change,
+                    rng.random(),
+                    "change",
+                )
+                .with_encryption(encryption),
+            )
         } else {
             None
         };
@@ -598,6 +646,77 @@ mod tests {
             .unwrap()
             .with_change(&mut rand::rng());
         assert!(matches!(spend, Err(SpendError::OutputsExceedInputs { .. })));
+    }
+
+    /// The scheme is chosen per transfer; the change note is legacy unless asked otherwise,
+    /// and then takes the signer's own KEM key or fails.
+    #[test]
+    fn encryption_is_chosen_per_note() {
+        use crate::crypto::{
+            kem::KemKeyPair,
+            keys::{ByteKey, SpendingKey},
+        };
+
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other_kem = KemKeyPair::derive(b"other");
+        let hybrid = NoteEncryption::HybridPq {
+            receiver_kem_key: other_kem.encapsulation_key().clone(),
+        };
+        let mut rng = rand::rng();
+
+        let spend = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])
+            .unwrap()
+            .transfer(other.address(), 10, "legacy")
+            .unwrap()
+            .transfer_with_encryption(other.address(), 20, "pq", hybrid.clone())
+            .unwrap()
+            .with_change(&mut rng)
+            .unwrap();
+        let by_memo = |memo: &str| {
+            spend
+                .transfers()
+                .iter()
+                .chain(spend.change_note())
+                .find(|n| n.memo == memo)
+                .unwrap()
+                .encryption
+                .clone()
+        };
+        assert_eq!(by_memo("legacy"), NoteEncryption::Legacy);
+        assert_eq!(by_memo("pq"), hybrid);
+        assert_eq!(by_memo("change"), NoteEncryption::Legacy);
+
+        // Hybrid change needs the signer's own key.
+        let err = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])
+            .unwrap()
+            .transfer(other.address(), 10, "")
+            .unwrap()
+            .with_hybrid_change()
+            .with_change(&mut rng)
+            .unwrap_err();
+        assert!(matches!(err, SpendError::ChangeNeedsKemKey { .. }));
+
+        let my_kem = KemKeyPair::derive(b"me");
+        let me_pq = PrivateKeySigner::new_with_kem(
+            SpendingKey::from_bytes([1u8; 32]),
+            ViewingKey::from_bytes([2u8; 32]),
+            my_kem.clone(),
+            ChainId::evm(1),
+        );
+        let spend = Spend::try_new(me_pq.clone(), vec![note(&me_pq, 0, 0, WETH, 100)])
+            .unwrap()
+            .transfer(other.address(), 10, "")
+            .unwrap()
+            .with_hybrid_change()
+            .with_change(&mut rng)
+            .unwrap();
+        assert_eq!(
+            spend.change_note().unwrap().encryption,
+            NoteEncryption::HybridPq {
+                receiver_kem_key: my_kem.encapsulation_key().clone()
+            }
+        );
     }
 
     /// A gas estimate must not cost a confirmation on a hardware wallet, or a threshold

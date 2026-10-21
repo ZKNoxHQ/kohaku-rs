@@ -13,7 +13,10 @@ use thiserror::Error;
 use crate::{
     account::{address::RailgunAddress, signer::RailgunSigner},
     caip::AssetId,
-    note::{Note, transfer::TransferNote, unshield::UnshieldNote, utxo::UtxoNote},
+    note::{
+        Note, encrypt::NoteEncryption, transfer::TransferNote, unshield::UnshieldNote,
+        utxo::UtxoNote,
+    },
     transact::spend::{Spend, SpendError},
 };
 
@@ -26,6 +29,7 @@ pub struct AmountIntents {
     unshields: HashSet<(RailgunAddress, AssetId)>,
     adapt_contract: Option<Address>,
     adapt_params: Option<[u8; 32]>,
+    hybrid_change: bool,
 }
 
 #[derive(Debug, Error)]
@@ -57,8 +61,14 @@ struct Intent {
 
 #[derive(Clone)]
 enum IntentKind {
-    Transfer { to: RailgunAddress, memo: String },
-    Unshield { to: Address },
+    Transfer {
+        to: RailgunAddress,
+        memo: String,
+        encryption: NoteEncryption,
+    },
+    Unshield {
+        to: Address,
+    },
 }
 
 struct Draft {
@@ -79,13 +89,28 @@ impl AmountIntents {
         Self::default()
     }
 
+    /// A transfer encrypted the way every Railgun wallet reads ([`NoteEncryption::Legacy`]).
     pub fn transfer(
+        self,
+        from: Arc<dyn RailgunSigner>,
+        to: RailgunAddress,
+        asset: AssetId,
+        value: u128,
+        memo: &str,
+    ) -> Self {
+        self.transfer_with_encryption(from, to, asset, value, memo, NoteEncryption::Legacy)
+    }
+
+    /// A transfer whose note is encrypted with `encryption`, for instance
+    /// [`NoteEncryption::HybridPq`] with the receiver's published KEM key.
+    pub fn transfer_with_encryption(
         mut self,
         from: Arc<dyn RailgunSigner>,
         to: RailgunAddress,
         asset: AssetId,
         value: u128,
         memo: &str,
+        encryption: NoteEncryption,
     ) -> Self {
         self.intents.push(Intent {
             from,
@@ -94,8 +119,16 @@ impl AmountIntents {
             kind: IntentKind::Transfer {
                 to,
                 memo: memo.to_string(),
+                encryption,
             },
         });
+        self
+    }
+
+    /// Encrypts the change notes with [`NoteEncryption::HybridPq`] to their signer's own KEM
+    /// key, see [`Spend::with_hybrid_change`].
+    pub fn with_hybrid_change(mut self) -> Self {
+        self.hybrid_change = true;
         self
     }
 
@@ -146,7 +179,15 @@ impl AmountIntents {
 
         let mut spends = Vec::new();
         for ((from, asset), intents) in groups {
-            spends.extend(build_group(notes, from, asset, intents, adapt, rng)?);
+            spends.extend(build_group(
+                notes,
+                from,
+                asset,
+                intents,
+                adapt,
+                self.hybrid_change,
+                rng,
+            )?);
         }
         Ok(spends)
     }
@@ -177,6 +218,8 @@ pub(crate) fn attach_fee(
         }
         spend.set_adapt(adapt_contract, adapt_params);
     }
+    // A fee spend opened on another tree follows the batch's choice for its change note.
+    let hybrid_change = spends.iter().any(Spend::hybrid_change);
 
     let viewing = fee_payer.viewing_key().public_key();
     let used: HashSet<(u32, u32)> = spends
@@ -261,6 +304,7 @@ pub(crate) fn attach_fee(
             fee_note,
             slice_at(&unused, tree),
             (adapt_contract, adapt_params),
+            hybrid_change,
             rng,
         )?);
     }
@@ -274,6 +318,7 @@ fn build_group(
     asset: AssetId,
     mut intents: Vec<Intent>,
     adapt: Option<(Address, [u8; 32])>,
+    hybrid_change: bool,
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<Spend>, AmountError> {
     // Smallest first, so a small intent does not get pushed onto a later tree
@@ -313,27 +358,14 @@ fn build_group(
         let notes = tree_notes.get(&tree).expect("draft tree has notes");
         let selected = select_notes(notes, draft.out_value());
         let inputs: Vec<UtxoNote> = selected.into_iter().cloned().collect();
-        let input_value: u128 = inputs.iter().map(Note::value).sum();
-        let change_value = input_value.saturating_sub(draft.out_value());
-        let change = if change_value > 0 {
-            Some(TransferNote::new(
-                draft.signer.viewing_key(),
-                draft.signer.address(),
-                asset,
-                change_value,
-                rng.random(),
-                "change",
-            ))
-        } else {
-            None
-        };
         spends.push(Spend::from_selected(
             draft.signer,
             inputs,
             draft.outputs,
             draft.unshield,
-            change,
             adapt,
+            hybrid_change,
+            rng,
         )?);
     }
     Ok(spends)
@@ -350,6 +382,7 @@ fn open_fee_spend(
     fee_note: TransferNote,
     notes: &[&UtxoNote],
     adapt: (Address, [u8; 32]),
+    hybrid_change: bool,
     rng: &mut impl CryptoRng,
 ) -> Result<Spend, AmountError> {
     let inputs: Vec<UtxoNote> = select_notes(notes, fee).into_iter().cloned().collect();
@@ -361,21 +394,16 @@ fn open_fee_spend(
             value: fee,
         });
     }
-    let change_value = input_value - fee;
-    let change = if change_value > 0 {
-        Some(TransferNote::new(
-            fee_payer.viewing_key(),
-            fee_payer.address(),
-            fee_asset,
-            change_value,
-            rng.random(),
-            "change",
-        ))
-    } else {
-        None
-    };
-    Spend::from_selected(fee_payer, inputs, vec![fee_note], None, change, Some(adapt))
-        .map_err(Into::into)
+    Spend::from_selected(
+        fee_payer,
+        inputs,
+        vec![fee_note],
+        None,
+        Some(adapt),
+        hybrid_change,
+        rng,
+    )
+    .map_err(Into::into)
 }
 
 fn split_intent(
@@ -425,14 +453,21 @@ fn insert_draft(
         unshield: None,
     });
     match &intent.kind {
-        IntentKind::Transfer { to, memo } => draft.outputs.push(TransferNote::new(
-            intent.from.viewing_key(),
-            *to,
-            intent.asset,
-            intent.value,
-            rng.random(),
+        IntentKind::Transfer {
+            to,
             memo,
-        )),
+            encryption,
+        } => draft.outputs.push(
+            TransferNote::new(
+                intent.from.viewing_key(),
+                *to,
+                intent.asset,
+                intent.value,
+                rng.random(),
+                memo,
+            )
+            .with_encryption(encryption.clone()),
+        ),
         IntentKind::Unshield { to } => {
             draft.unshield = Some(UnshieldNote::new(*to, intent.asset, intent.value));
         }

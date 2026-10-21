@@ -171,6 +171,11 @@ impl Operation {
         self.unshield_note.clone()
     }
 
+    /// The transfer outputs, change included.
+    pub fn transfer_notes(&self) -> &[TransferNote] {
+        &self.out_notes
+    }
+
     pub fn out_encryptable_notes(&self) -> Vec<Box<dyn EncryptableNote>> {
         let mut notes: Vec<Box<dyn EncryptableNote>> = Vec::new();
 
