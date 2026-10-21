@@ -57,6 +57,7 @@ struct PendingTransfer {
     value: u128,
     memo: String,
     encryption: NoteEncryption,
+    hide_sender: bool,
 }
 
 #[derive(Debug, Error)]
@@ -148,11 +149,24 @@ impl Spend {
     /// by `encryption`, for instance [`NoteEncryption::HybridPq`] with the receiver's published
     /// KEM key.
     pub fn transfer_with_encryption(
+        self,
+        to: RailgunAddress,
+        value: u128,
+        memo: &str,
+        encryption: NoteEncryption,
+    ) -> Result<Self, SpendError> {
+        self.transfer_with(to, value, memo, encryption, false)
+    }
+
+    /// A transfer with every option: the encryption scheme, and whether the sender is hidden
+    /// from whoever opens the note ([`TransferNote::hide_sender`]).
+    pub fn transfer_with(
         mut self,
         to: RailgunAddress,
         value: u128,
         memo: &str,
         encryption: NoteEncryption,
+        hide_sender: bool,
     ) -> Result<Self, SpendError> {
         self.ensure_open()?;
         self.pending.push(PendingTransfer {
@@ -160,6 +174,7 @@ impl Spend {
             value,
             memo: memo.to_string(),
             encryption,
+            hide_sender,
         });
         Ok(self)
     }
@@ -209,17 +224,20 @@ impl Spend {
         let asset = self.asset();
         let viewing = self.signer.viewing_key();
         for pending in self.pending.drain(..) {
-            self.outputs.push(
-                TransferNote::new(
-                    viewing,
-                    pending.to,
-                    asset,
-                    pending.value,
-                    rng.random(),
-                    &pending.memo,
-                )
-                .with_encryption(pending.encryption),
-            );
+            let note = TransferNote::new(
+                viewing,
+                pending.to,
+                asset,
+                pending.value,
+                rng.random(),
+                &pending.memo,
+            )
+            .with_encryption(pending.encryption);
+            self.outputs.push(if pending.hide_sender {
+                note.with_hidden_sender()
+            } else {
+                note
+            });
         }
         self.rebuild_change(rng)?;
         self.finalized = true;
@@ -686,6 +704,16 @@ mod tests {
         assert_eq!(by_memo("legacy"), NoteEncryption::Legacy);
         assert_eq!(by_memo("pq"), hybrid);
         assert_eq!(by_memo("change"), NoteEncryption::Legacy);
+        assert!(spend.transfers().iter().all(|n| !n.hide_sender));
+
+        let spend = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])
+            .unwrap()
+            .transfer_with(other.address(), 10, "fee", NoteEncryption::Legacy, true)
+            .unwrap()
+            .with_change(&mut rng)
+            .unwrap();
+        assert!(spend.transfers()[0].hide_sender);
+        assert!(!spend.change_note().unwrap().hide_sender);
 
         // Hybrid change needs the signer's own key.
         let err = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])

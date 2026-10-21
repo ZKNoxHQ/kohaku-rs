@@ -276,6 +276,8 @@ pub(crate) fn attach_fee(
         });
     };
 
+    // The paymaster checks the fee from `paymasterData`, it has no use for the sender: hidden,
+    // so that opening the fee note does not tell which account paid.
     let fee_note = TransferNote::new(
         fee_payer.viewing_key(),
         fee_to,
@@ -283,7 +285,8 @@ pub(crate) fn attach_fee(
         fee,
         rng.random(),
         "fee",
-    );
+    )
+    .with_hidden_sender();
 
     if let Some(spend) = spends.iter_mut().find(|spend| {
         spend.tree() == tree
@@ -610,7 +613,7 @@ mod tests {
             with_fee[0]
                 .transfers()
                 .iter()
-                .any(|note| note.memo() == "fee" && note.value() == 10)
+                .any(|note| note.memo() == "fee" && note.value() == 10 && note.hide_sender)
         );
         assert_eq!(with_fee[0].change_note().unwrap().value(), 60);
 
