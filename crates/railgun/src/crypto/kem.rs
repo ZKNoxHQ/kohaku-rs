@@ -48,8 +48,9 @@ impl KemKeyPair {
         }
     }
 
-    /// Key pair from a wallet secret of any length, such as a BIP-32 key at [`kem_key_path`]:
-    /// the seed is `SHA-512("RAILGUN-PQ-V1-KEM" || secret)`.
+    /// Key pair from a wallet secret of any length, such as a BIP-32 key at [`kem_key_path`]
+    /// or the viewing key ([`crate::crypto::keys::ViewingKey::kem_key_pair`]): the seed is
+    /// `SHA-512("RAILGUN-PQ-V1-KEM" || secret)`.
     pub fn derive(secret: &[u8]) -> Self {
         let seed = Sha512::new()
             .chain_update(b"RAILGUN-PQ-V1-KEM")
