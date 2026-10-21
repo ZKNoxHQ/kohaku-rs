@@ -1,3 +1,11 @@
+//! Encryption of the data a note carries on-chain.
+//!
+//! Shields use one scheme, Railgun V2's ECDH + AES-GCM ([`encrypt_shield`]). Transact outputs
+//! can use several: the sender picks a [`NoteEncryption`] per note, and the receiver tells the
+//! schemes apart from the on-chain data ([`decrypt_transact_as_receiver`]). Every scheme fills
+//! the V2 contract's `CommitmentCiphertext` and keeps the V2 plaintext layout, so what a wallet
+//! learns from a note does not depend on how it was encrypted.
+
 use curve25519_dalek::{Scalar, edwards::CompressedEdwardsY};
 use kohaku_crypto::poseidon_hash;
 use rand::{CryptoRng, RngExt};
@@ -7,14 +15,17 @@ use thiserror::Error;
 
 use crate::{
     abis::railgun::{CommitmentCiphertext, CommitmentPreimage, ShieldCiphertext, ShieldRequest},
-    account::address::RailgunAddress,
+    account::{address::RailgunAddress, signer::RailgunSigner},
     caip::AssetId,
     crypto::{
         aes::AesError,
         keys::{BlindedKey, ByteKey, KeyError, U256Key, ViewingKey, ViewingPublicKey},
         railgun_base_37,
     },
+    indexer::syncer,
 };
+
+pub mod legacy;
 
 #[derive(Debug, Error)]
 pub enum EncryptError {
@@ -26,10 +37,41 @@ pub enum EncryptError {
     Key(#[from] KeyError),
 }
 
-/// Encrypts a note into a CommitmentCiphertext
-///
-/// TODO: Add details on blind
-pub fn encrypt_note(
+#[derive(Debug, Error)]
+pub enum DecryptError {
+    #[error("AES decryption error: {0}")]
+    Aes(#[from] AesError),
+    #[error("Key error: {0}")]
+    Key(#[from] KeyError),
+    #[error("Note plaintext does not have the V2 layout")]
+    Malformed,
+}
+
+/// How a transact output is encrypted for its receiver, and for its sender to read back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NoteEncryption {
+    /// Railgun V2: ed25519 ECDH on blinded viewing keys and AES-256-GCM. Readable by every
+    /// Railgun wallet.
+    #[default]
+    Legacy,
+}
+
+/// What a transact output encrypts, in Railgun V2's layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotePlaintext {
+    /// The receiver's master public key, as is (kohaku) or XOR the sender's (the Railgun engine).
+    pub encoded_master_key: [u8; 32],
+    pub token_hash: [u8; 32],
+    pub random: [u8; 16],
+    pub value: u128,
+    pub memo: Vec<u8>,
+}
+
+/// Encrypts a transact output with the scheme the sender chose.
+#[allow(clippy::too_many_arguments)]
+pub fn encrypt_transact(
+    encryption: &NoteEncryption,
     receiver: &RailgunAddress,
     shared_random: &[u8; 16],
     value: u128,
@@ -39,57 +81,36 @@ pub fn encrypt_note(
     blind: bool,
     rng: &mut dyn CryptoRng,
 ) -> Result<CommitmentCiphertext, EncryptError> {
-    let output_type = 0;
-    let application_identifier = railgun_base_37::encode("railgun rs")?;
-    let sender_random: [u8; 15] = if blind { rng.random() } else { [0u8; 15] };
+    match encryption {
+        NoteEncryption::Legacy => legacy::encrypt(
+            receiver,
+            shared_random,
+            value,
+            asset,
+            memo,
+            viewing_key,
+            blind,
+            rng,
+        ),
+    }
+}
 
-    let (blinded_sender, blinded_receiver) = blind_viewing_keys(
-        viewing_key.public_key(),
-        receiver.viewing_pubkey(),
-        &concat_arrays(shared_random, &[0u8; 16]),
-        &concat_arrays(&sender_random, &[0u8; 17]),
-    )?;
+/// Decrypts a transact output addressed to `signer`, whatever scheme the sender used.
+pub fn decrypt_transact_as_receiver(
+    signer: &dyn RailgunSigner,
+    transact: &syncer::Transact,
+) -> Result<NotePlaintext, DecryptError> {
+    // Only the legacy format exists so far.
+    legacy::decrypt_as_receiver(signer, transact)
+}
 
-    let shared_key = viewing_key.derive_shared_key_blinded(blinded_receiver)?;
-    let gcm = shared_key.encrypt_gcm(
-        &[
-            receiver.master_key().as_bytes(),
-            &asset.hash().to_be_bytes_vec(),
-            &concat_arrays::<16, 16, 32>(shared_random, &value.to_be_bytes()),
-            memo.as_bytes(),
-        ],
-        &rng.random(),
-    )?;
-
-    let ctr0: [u8; 16] = concat_arrays(&[output_type], &sender_random);
-    let ctr1 = [0u8; 16];
-    let ctr2 = application_identifier;
-    let ctr = viewing_key.encrypt_ctr(&[&ctr0, &ctr1, &ctr2], &rng.random());
-
-    let bundle_1: [u8; 32] = gcm.data[0].clone().try_into().unwrap();
-    let bundle_2: [u8; 32] = gcm.data[1].clone().try_into().unwrap();
-    let bundle_3: [u8; 32] = gcm.data[2].clone().try_into().unwrap();
-
-    Ok(CommitmentCiphertext {
-        // iv (16) | tag (16)
-        // master_public_key (32)
-        // token_hash (32)
-        // random (16) | value (16)
-        ciphertext: [
-            concat_arrays(&gcm.iv, &gcm.tag).into(),
-            bundle_1.into(),
-            bundle_2.into(),
-            bundle_3.into(),
-        ],
-        blindedSenderViewingKey: blinded_sender.to_u256().into(),
-        blindedReceiverViewingKey: blinded_receiver.to_u256().into(),
-        // ctr_iv (16) | outputType (1) | senderRandom (15) | padding (16) | applicationIdentifier
-        // (16)
-        annotationData: [ctr.iv.as_slice(), &ctr.data[0], &ctr.data[1], &ctr.data[2]]
-            .concat()
-            .into(),
-        memo: gcm.data[3].clone().into(),
-    })
+/// Decrypts a transact output `signer` sent, from the material each scheme leaves for the
+/// sender.
+pub fn decrypt_transact_as_sender(
+    signer: &dyn RailgunSigner,
+    transact: &syncer::Transact,
+) -> Result<NotePlaintext, DecryptError> {
+    legacy::decrypt_as_sender(signer, transact)
 }
 
 pub fn encrypt_shield(
@@ -196,7 +217,10 @@ mod tests {
             chain::ChainId,
             signer::{PrivateKeySigner, RailgunSigner},
         },
-        crypto::keys::{HexKey, SpendingKey},
+        crypto::{
+            aes::Ciphertext,
+            keys::{HexKey, SpendingKey},
+        },
     };
 
     #[test]
@@ -219,7 +243,8 @@ mod tests {
         let asset = AssetId::Erc20(address!("0x1234567890123456789012345678901234567890"));
         let memo = "test memo";
 
-        let encrypted = encrypt_note(
+        let encrypted = encrypt_transact(
+            &NoteEncryption::Legacy,
             &receiver,
             &shared_random,
             value,
@@ -232,6 +257,70 @@ mod tests {
         .unwrap();
 
         insta::assert_debug_snapshot!(encrypted);
+    }
+
+    /// What the sender encrypts is what both the receiver and the sender decrypt, through the
+    /// scheme-agnostic entry points, for every scheme.
+    #[test]
+    fn transact_round_trip() {
+        let mut rng = ChaChaRng::seed_from_u64(1);
+        let sender = PrivateKeySigner::new_evm(
+            SpendingKey::from_bytes([1u8; 32]),
+            ViewingKey::from_bytes([2u8; 32]),
+            1,
+        );
+        let receiver = PrivateKeySigner::new_evm(
+            SpendingKey::from_bytes([3u8; 32]),
+            ViewingKey::from_bytes([4u8; 32]),
+            1,
+        );
+        let asset = AssetId::Erc20(address!("0x1234567890123456789012345678901234567890"));
+        let shared_random = [5u8; 16];
+
+        for encryption in [NoteEncryption::Legacy] {
+            let encrypted = encrypt_transact(
+                &encryption,
+                &receiver.address(),
+                &shared_random,
+                1000,
+                &asset,
+                "test memo",
+                sender.viewing_key(),
+                false,
+                &mut rng,
+            )
+            .unwrap();
+            let on_chain = syncer::Transact {
+                tree_number: 0,
+                leaf_index: 0,
+                hash: U256::ZERO,
+                blinded_sender_viewing_key: encrypted.blindedSenderViewingKey.0,
+                blinded_receiver_viewing_key: encrypted.blindedReceiverViewingKey.0,
+                annotation_data: encrypted.annotationData.to_vec(),
+                ciphertext: Ciphertext::from(encrypted),
+            };
+
+            let expected = NotePlaintext {
+                encoded_master_key: *receiver.address().master_key().as_bytes(),
+                token_hash: asset.hash().to_be_bytes(),
+                random: shared_random,
+                value: 1000,
+                memo: b"test memo".to_vec(),
+            };
+            let as_receiver = decrypt_transact_as_receiver(receiver.as_ref(), &on_chain).unwrap();
+            let as_sender = decrypt_transact_as_sender(sender.as_ref(), &on_chain).unwrap();
+            assert_eq!(as_receiver, expected, "{encryption:?}");
+            assert_eq!(as_sender, expected, "{encryption:?}");
+
+            // Not for a third party.
+            let other = PrivateKeySigner::new_evm(
+                SpendingKey::from_bytes([7u8; 32]),
+                ViewingKey::from_bytes([8u8; 32]),
+                1,
+            );
+            assert!(decrypt_transact_as_receiver(other.as_ref(), &on_chain).is_err());
+            assert!(decrypt_transact_as_sender(other.as_ref(), &on_chain).is_err());
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::{
     merkle_tree::UtxoLeafHash,
     note::{
         EncryptableNote, Note,
-        encrypt::{EncryptError, encrypt_note},
+        encrypt::{EncryptError, NoteEncryption, encrypt_transact},
     },
 };
 
@@ -23,6 +23,8 @@ pub struct TransferNote {
     pub value: u128,
     pub random: [u8; 16],
     pub memo: String,
+    /// How the note is encrypted for `to`; [`NoteEncryption::Legacy`] unless chosen otherwise.
+    pub encryption: NoteEncryption,
 }
 
 impl TransferNote {
@@ -41,13 +43,21 @@ impl TransferNote {
             value,
             random,
             memo: memo.to_string(),
+            encryption: NoteEncryption::default(),
         }
+    }
+
+    /// Encrypts the note with `encryption` instead of the legacy scheme.
+    pub fn with_encryption(mut self, encryption: NoteEncryption) -> Self {
+        self.encryption = encryption;
+        self
     }
 }
 
 impl EncryptableNote for TransferNote {
     fn encrypt(&self, rng: &mut dyn CryptoRng) -> Result<CommitmentCiphertext, EncryptError> {
-        encrypt_note(
+        encrypt_transact(
+            &self.encryption,
             &self.to,
             &self.random,
             self.value,
