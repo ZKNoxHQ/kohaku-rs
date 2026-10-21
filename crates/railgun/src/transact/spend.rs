@@ -47,7 +47,7 @@ pub struct Spend {
     adapt_contract: Option<Address>,
     adapt_params: Option<[u8; 32]>,
     /// The change note goes back to its signer under [`NoteEncryption::HybridPq`] with its own
-    /// KEM key, see [`Self::with_hybrid_change`].
+    /// KEM key even when no transfer is hybrid, see [`Self::with_hybrid_change`].
     hybrid_change: bool,
 }
 
@@ -180,9 +180,13 @@ impl Spend {
     }
 
     /// Encrypts the change note with [`NoteEncryption::HybridPq`] to the signer's own KEM
-    /// key. Building fails if the signer has none: the choice is never downgraded silently. Off
-    /// by default, so that wallets without the key (and legacy wallets on the same seed) keep
-    /// seeing the change.
+    /// key even when no transfer is hybrid. Off by default, so that wallets without the key
+    /// (legacy wallets on the same seed) keep seeing the change of legacy transactions.
+    ///
+    /// The change note is hybrid regardless whenever a transfer of the spend is: a legacy
+    /// change note next to a hybrid output would let a quantum attacker unblind its receiver,
+    /// the sender, and so deanonymise the whole transaction. In both cases building fails if
+    /// the signer has no KEM key: the choice is never downgraded silently.
     pub fn with_hybrid_change(mut self) -> Self {
         self.hybrid_change = true;
         self
@@ -388,7 +392,12 @@ impl Spend {
         }
         let change = inputs - outputs;
         self.change = if change > 0 {
-            let encryption = if self.hybrid_change {
+            let hybrid = self.hybrid_change
+                || self
+                    .outputs
+                    .iter()
+                    .any(|note| matches!(note.encryption, NoteEncryption::HybridPq { .. }));
+            let encryption = if hybrid {
                 let Some(kem) = self.signer.kem_key_pair() else {
                     return Err(SpendError::ChangeNeedsKemKey {
                         from: self.signer.address(),
@@ -666,8 +675,9 @@ mod tests {
         assert!(matches!(spend, Err(SpendError::OutputsExceedInputs { .. })));
     }
 
-    /// The scheme is chosen per transfer; the change note is legacy unless asked otherwise,
-    /// and then takes the signer's own KEM key or fails.
+    /// The scheme is chosen per transfer. The change note is legacy in an all-legacy spend
+    /// unless asked otherwise, and hybrid as soon as one transfer is, taking the signer's own
+    /// KEM key or failing.
     #[test]
     fn encryption_is_chosen_per_note() {
         use crate::crypto::{
@@ -683,7 +693,40 @@ mod tests {
         };
         let mut rng = rand::rng();
 
+        // All legacy: the change is legacy too, and the sender visible everywhere.
         let spend = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])
+            .unwrap()
+            .transfer(other.address(), 10, "legacy")
+            .unwrap()
+            .with_change(&mut rng)
+            .unwrap();
+        assert!(
+            spend
+                .transfers()
+                .iter()
+                .chain(spend.change_note())
+                .all(|n| n.encryption == NoteEncryption::Legacy && !n.hide_sender)
+        );
+
+        // One hybrid transfer forces hybrid change, which this signer cannot produce.
+        let err = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])
+            .unwrap()
+            .transfer(other.address(), 10, "legacy")
+            .unwrap()
+            .transfer_with_encryption(other.address(), 20, "pq", hybrid.clone())
+            .unwrap()
+            .with_change(&mut rng)
+            .unwrap_err();
+        assert!(matches!(err, SpendError::ChangeNeedsKemKey { .. }));
+
+        let my_kem = KemKeyPair::derive(b"me");
+        let me_pq = PrivateKeySigner::new_with_kem(
+            SpendingKey::from_bytes([1u8; 32]),
+            ViewingKey::from_bytes([2u8; 32]),
+            my_kem.clone(),
+            ChainId::evm(1),
+        );
+        let spend = Spend::try_new(me_pq.clone(), vec![note(&me_pq, 0, 0, WETH, 100)])
             .unwrap()
             .transfer(other.address(), 10, "legacy")
             .unwrap()
@@ -703,8 +746,12 @@ mod tests {
         };
         assert_eq!(by_memo("legacy"), NoteEncryption::Legacy);
         assert_eq!(by_memo("pq"), hybrid);
-        assert_eq!(by_memo("change"), NoteEncryption::Legacy);
-        assert!(spend.transfers().iter().all(|n| !n.hide_sender));
+        assert_eq!(
+            by_memo("change"),
+            NoteEncryption::HybridPq {
+                receiver_kem_key: my_kem.encapsulation_key().clone()
+            }
+        );
 
         let spend = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])
             .unwrap()
@@ -715,7 +762,7 @@ mod tests {
         assert!(spend.transfers()[0].hide_sender);
         assert!(!spend.change_note().unwrap().hide_sender);
 
-        // Hybrid change needs the signer's own key.
+        // Hybrid change on request, in an all-legacy spend: needs the signer's own key.
         let err = Spend::try_new(me.clone(), vec![note(&me, 0, 0, WETH, 100)])
             .unwrap()
             .transfer(other.address(), 10, "")
@@ -725,13 +772,6 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SpendError::ChangeNeedsKemKey { .. }));
 
-        let my_kem = KemKeyPair::derive(b"me");
-        let me_pq = PrivateKeySigner::new_with_kem(
-            SpendingKey::from_bytes([1u8; 32]),
-            ViewingKey::from_bytes([2u8; 32]),
-            my_kem.clone(),
-            ChainId::evm(1),
-        );
         let spend = Spend::try_new(me_pq.clone(), vec![note(&me_pq, 0, 0, WETH, 100)])
             .unwrap()
             .transfer(other.address(), 10, "")
