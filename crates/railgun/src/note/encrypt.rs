@@ -19,12 +19,14 @@ use crate::{
     caip::AssetId,
     crypto::{
         aes::AesError,
+        kem::KemEncapsulationKey,
         keys::{BlindedKey, ByteKey, KeyError, U256Key, ViewingKey, ViewingPublicKey},
         railgun_base_37,
     },
     indexer::syncer,
 };
 
+pub mod hybrid;
 pub mod legacy;
 
 #[derive(Debug, Error)]
@@ -45,6 +47,8 @@ pub enum DecryptError {
     Key(#[from] KeyError),
     #[error("Note plaintext does not have the V2 layout")]
     Malformed,
+    #[error("Post-quantum encrypted note, and this signer has no ML-KEM key")]
+    NoKemKey,
 }
 
 /// How a transact output is encrypted for its receiver, and for its sender to read back.
@@ -55,6 +59,12 @@ pub enum NoteEncryption {
     /// Railgun wallet.
     #[default]
     Legacy,
+    /// The same ECDH combined with ML-KEM-768 to the receiver's encapsulation key, no curve
+    /// point in the clear. Only wallets with the matching key pair read the note. See
+    /// [`hybrid`].
+    HybridPq {
+        receiver_kem_key: KemEncapsulationKey,
+    },
 }
 
 /// What a transact output encrypts, in Railgun V2's layout.
@@ -66,6 +76,34 @@ pub struct NotePlaintext {
     pub random: [u8; 16],
     pub value: u128,
     pub memo: Vec<u8>,
+}
+
+impl NotePlaintext {
+    /// From the decrypted blocks: encoded master public key (32), token hash (32),
+    /// random (16) | value (16), memo.
+    fn from_bundle(bundle: Vec<Vec<u8>>) -> Result<Self, DecryptError> {
+        let [encoded_master_key, token_hash, random_value, memo @ ..] = bundle.as_slice() else {
+            return Err(DecryptError::Malformed);
+        };
+        let (Ok(encoded_master_key), Ok(token_hash), Ok(random_value)) = (
+            <[u8; 32]>::try_from(encoded_master_key.as_slice()),
+            <[u8; 32]>::try_from(token_hash.as_slice()),
+            <[u8; 32]>::try_from(random_value.as_slice()),
+        ) else {
+            return Err(DecryptError::Malformed);
+        };
+        let mut random = [0u8; 16];
+        random.copy_from_slice(&random_value[..16]);
+        let mut value = [0u8; 16];
+        value.copy_from_slice(&random_value[16..]);
+        Ok(NotePlaintext {
+            encoded_master_key,
+            token_hash,
+            random,
+            value: u128::from_be_bytes(value),
+            memo: memo.concat(),
+        })
+    }
 }
 
 /// Encrypts a transact output with the scheme the sender chose.
@@ -92,6 +130,17 @@ pub fn encrypt_transact(
             blind,
             rng,
         ),
+        NoteEncryption::HybridPq { receiver_kem_key } => hybrid::encrypt(
+            receiver_kem_key,
+            receiver,
+            shared_random,
+            value,
+            asset,
+            memo,
+            viewing_key,
+            blind,
+            rng,
+        ),
     }
 }
 
@@ -100,8 +149,11 @@ pub fn decrypt_transact_as_receiver(
     signer: &dyn RailgunSigner,
     transact: &syncer::Transact,
 ) -> Result<NotePlaintext, DecryptError> {
-    // Only the legacy format exists so far.
-    legacy::decrypt_as_receiver(signer, transact)
+    if hybrid::is_hybrid(transact) {
+        hybrid::decrypt_as_receiver(signer, transact)
+    } else {
+        legacy::decrypt_as_receiver(signer, transact)
+    }
 }
 
 /// Decrypts a transact output `signer` sent, from the material each scheme leaves for the
@@ -110,7 +162,11 @@ pub fn decrypt_transact_as_sender(
     signer: &dyn RailgunSigner,
     transact: &syncer::Transact,
 ) -> Result<NotePlaintext, DecryptError> {
-    legacy::decrypt_as_sender(signer, transact)
+    if hybrid::is_hybrid(transact) {
+        hybrid::decrypt_as_sender(signer, transact)
+    } else {
+        legacy::decrypt_as_sender(signer, transact)
+    }
 }
 
 pub fn encrypt_shield(
@@ -219,6 +275,7 @@ mod tests {
         },
         crypto::{
             aes::Ciphertext,
+            kem::KemKeyPair,
             keys::{HexKey, SpendingKey},
         },
     };
@@ -269,15 +326,21 @@ mod tests {
             ViewingKey::from_bytes([2u8; 32]),
             1,
         );
-        let receiver = PrivateKeySigner::new_evm(
+        let receiver = PrivateKeySigner::new_with_kem(
             SpendingKey::from_bytes([3u8; 32]),
             ViewingKey::from_bytes([4u8; 32]),
-            1,
+            KemKeyPair::derive(b"receiver"),
+            ChainId::evm(1),
         );
         let asset = AssetId::Erc20(address!("0x1234567890123456789012345678901234567890"));
         let shared_random = [5u8; 16];
 
-        for encryption in [NoteEncryption::Legacy] {
+        for encryption in [
+            NoteEncryption::Legacy,
+            NoteEncryption::HybridPq {
+                receiver_kem_key: receiver.kem_key_pair().unwrap().encapsulation_key().clone(),
+            },
+        ] {
             let encrypted = encrypt_transact(
                 &encryption,
                 &receiver.address(),
@@ -321,6 +384,90 @@ mod tests {
             assert!(decrypt_transact_as_receiver(other.as_ref(), &on_chain).is_err());
             assert!(decrypt_transact_as_sender(other.as_ref(), &on_chain).is_err());
         }
+    }
+
+    /// The hybrid format on the unchanged contract: V2 layout in `ciphertext` and `memo`, the
+    /// key blob in the two key fields, the rest in the annotation data. The sender reads it
+    /// without any KEM key; a legacy wallet does not read it at all; nothing survives a
+    /// tampered KEM ciphertext.
+    #[test]
+    fn hybrid_format_and_failure_modes() {
+        let mut rng = ChaChaRng::seed_from_u64(2);
+        let sender = PrivateKeySigner::new_evm(
+            SpendingKey::from_bytes([1u8; 32]),
+            ViewingKey::from_bytes([2u8; 32]),
+            1,
+        );
+        let kem = KemKeyPair::derive(b"receiver");
+        let receiver = PrivateKeySigner::new_with_kem(
+            SpendingKey::from_bytes([3u8; 32]),
+            ViewingKey::from_bytes([4u8; 32]),
+            kem.clone(),
+            ChainId::evm(1),
+        );
+        let asset = AssetId::Erc20(address!("0x1234567890123456789012345678901234567890"));
+        let encrypted = encrypt_transact(
+            &NoteEncryption::HybridPq {
+                receiver_kem_key: kem.encapsulation_key().clone(),
+            },
+            &receiver.address(),
+            &[5u8; 16],
+            1000,
+            &asset,
+            "memo",
+            sender.viewing_key(),
+            true,
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(encrypted.annotationData.len(), hybrid::TEST_ANNOTATION_SIZE);
+        assert_eq!(&encrypted.annotationData[..5], b"RGPQ\x01");
+        assert_eq!(encrypted.memo.len(), 4);
+
+        let on_chain = |encrypted: &CommitmentCiphertext| syncer::Transact {
+            tree_number: 0,
+            leaf_index: 0,
+            hash: U256::ZERO,
+            blinded_sender_viewing_key: encrypted.blindedSenderViewingKey.0,
+            blinded_receiver_viewing_key: encrypted.blindedReceiverViewingKey.0,
+            annotation_data: encrypted.annotationData.to_vec(),
+            ciphertext: Ciphertext::from(encrypted.clone()),
+        };
+        let note = on_chain(&encrypted);
+        assert!(decrypt_transact_as_receiver(receiver.as_ref(), &note).is_ok());
+        assert!(decrypt_transact_as_sender(sender.as_ref(), &note).is_ok());
+
+        // Same keys, no KEM key pair: a legacy wallet.
+        let legacy_receiver = PrivateKeySigner::new_evm(
+            SpendingKey::from_bytes([3u8; 32]),
+            ViewingKey::from_bytes([4u8; 32]),
+            1,
+        );
+        assert!(matches!(
+            decrypt_transact_as_receiver(legacy_receiver.as_ref(), &note),
+            Err(DecryptError::NoKemKey)
+        ));
+
+        // Another KEM key with the same viewing key: implicit rejection, then a GCM failure.
+        let other_kem = PrivateKeySigner::new_with_kem(
+            SpendingKey::from_bytes([3u8; 32]),
+            ViewingKey::from_bytes([4u8; 32]),
+            KemKeyPair::derive(b"other"),
+            ChainId::evm(1),
+        );
+        assert!(matches!(
+            decrypt_transact_as_receiver(other_kem.as_ref(), &note),
+            Err(DecryptError::Aes(_))
+        ));
+
+        // A tampered KEM ciphertext breaks the associated data for both parties.
+        let mut tampered = encrypted.clone();
+        let mut data = tampered.annotationData.to_vec();
+        data[5] ^= 1;
+        tampered.annotationData = data.into();
+        let tampered = on_chain(&tampered);
+        assert!(decrypt_transact_as_receiver(receiver.as_ref(), &tampered).is_err());
+        assert!(decrypt_transact_as_sender(sender.as_ref(), &tampered).is_err());
     }
 
     #[test]

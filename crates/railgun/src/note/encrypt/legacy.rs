@@ -92,7 +92,7 @@ pub(super) fn decrypt_as_receiver(
     let shared_key = signer
         .viewing_key()
         .derive_shared_key_blinded(blinded_sender)?;
-    parse(shared_key.decrypt_gcm(&transact.ciphertext)?)
+    NotePlaintext::from_bundle(shared_key.decrypt_gcm(&transact.ciphertext)?)
 }
 
 /// The sender's shared key comes from the blinded receiver key.
@@ -104,30 +104,5 @@ pub(super) fn decrypt_as_sender(
     let shared_key = signer
         .viewing_key()
         .derive_shared_key_blinded(blinded_receiver)?;
-    parse(shared_key.decrypt_gcm(&transact.ciphertext)?)
-}
-
-/// encoded master public key (32), token hash (32), random (16) | value (16), memo
-fn parse(bundle: Vec<Vec<u8>>) -> Result<NotePlaintext, DecryptError> {
-    let [encoded_master_key, token_hash, random_value, memo @ ..] = bundle.as_slice() else {
-        return Err(DecryptError::Malformed);
-    };
-    let (Ok(encoded_master_key), Ok(token_hash), Ok(random_value)) = (
-        <[u8; 32]>::try_from(encoded_master_key.as_slice()),
-        <[u8; 32]>::try_from(token_hash.as_slice()),
-        <[u8; 32]>::try_from(random_value.as_slice()),
-    ) else {
-        return Err(DecryptError::Malformed);
-    };
-    let mut random = [0u8; 16];
-    random.copy_from_slice(&random_value[..16]);
-    let mut value = [0u8; 16];
-    value.copy_from_slice(&random_value[16..]);
-    Ok(NotePlaintext {
-        encoded_master_key,
-        token_hash,
-        random,
-        value: u128::from_be_bytes(value),
-        memo: memo.concat(),
-    })
+    NotePlaintext::from_bundle(shared_key.decrypt_gcm(&transact.ciphertext)?)
 }
