@@ -108,6 +108,7 @@ enum IntentKind {
         to: RailgunAddress,
         memo: String,
         encryption: NoteEncryption,
+        hide_sender: bool,
     },
     Unshield {
         to: Address,
@@ -143,6 +144,21 @@ impl TransactionBuilder {
     /// Adds a transfer operation whose note is encrypted with `encryption`, for instance
     /// [`NoteEncryption::HybridPq`] with the receiver's published KEM key.
     pub fn transfer_with_encryption(
+        self,
+        from: Arc<dyn RailgunSigner>,
+        to: RailgunAddress,
+        asset: AssetId,
+        value: u128,
+        memo: &str,
+        encryption: NoteEncryption,
+    ) -> Self {
+        self.transfer_with(from, to, asset, value, memo, encryption, false)
+    }
+
+    /// Adds a transfer operation with every option: the encryption scheme, and whether the
+    /// sender is hidden from whoever opens the note ([`TransferNote::hide_sender`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_with(
         mut self,
         from: Arc<dyn RailgunSigner>,
         to: RailgunAddress,
@@ -150,6 +166,7 @@ impl TransactionBuilder {
         value: u128,
         memo: &str,
         encryption: NoteEncryption,
+        hide_sender: bool,
     ) -> Self {
         self.intents.push(Intent {
             from,
@@ -159,6 +176,7 @@ impl TransactionBuilder {
                 to,
                 memo: memo.to_string(),
                 encryption,
+                hide_sender,
             },
         });
         self
@@ -410,8 +428,9 @@ fn insert_operation(
             to,
             memo,
             encryption,
-        } => op.add_out_note(
-            TransferNote::new(
+            hide_sender,
+        } => {
+            let note = TransferNote::new(
                 intent.from.viewing_key(),
                 to,
                 intent.asset,
@@ -419,8 +438,13 @@ fn insert_operation(
                 rng.random(),
                 &memo,
             )
-            .with_encryption(encryption),
-        ),
+            .with_encryption(encryption);
+            op.add_out_note(if hide_sender {
+                note.with_hidden_sender()
+            } else {
+                note
+            })
+        }
         IntentKind::Unshield { to } => {
             op.set_unshield_note(UnshieldNote::new(to, intent.asset, intent.value))
         }
@@ -691,6 +715,26 @@ mod tests {
         assert_eq!(by_memo("legacy"), NoteEncryption::Legacy);
         assert_eq!(by_memo("pq"), hybrid);
         assert_eq!(by_memo("change"), NoteEncryption::Legacy);
+        assert!(ops[0].transfer_notes().iter().all(|n| !n.hide_sender));
+
+        let ops = TransactionBuilder::new()
+            .transfer_with(
+                me.clone(),
+                other.address(),
+                WETH,
+                10,
+                "fee",
+                NoteEncryption::Legacy,
+                true,
+            )
+            .operations(&notes, &mut rand::rng())
+            .unwrap();
+        let fee = ops[0]
+            .transfer_notes()
+            .iter()
+            .find(|n| n.memo == "fee")
+            .unwrap();
+        assert!(fee.hide_sender);
 
         // Hybrid change needs the signer's own key.
         let err = TransactionBuilder::new()

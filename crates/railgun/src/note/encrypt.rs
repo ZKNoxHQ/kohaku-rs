@@ -335,11 +335,14 @@ mod tests {
         let asset = AssetId::Erc20(address!("0x1234567890123456789012345678901234567890"));
         let shared_random = [5u8; 16];
 
-        for encryption in [
-            NoteEncryption::Legacy,
-            NoteEncryption::HybridPq {
-                receiver_kem_key: receiver.kem_key_pair().unwrap().encapsulation_key().clone(),
-            },
+        let hybrid = NoteEncryption::HybridPq {
+            receiver_kem_key: receiver.kem_key_pair().unwrap().encapsulation_key().clone(),
+        };
+        for (encryption, hide_sender) in [
+            (NoteEncryption::Legacy, false),
+            (NoteEncryption::Legacy, true),
+            (hybrid.clone(), false),
+            (hybrid, true),
         ] {
             let encrypted = encrypt_transact(
                 &encryption,
@@ -349,7 +352,7 @@ mod tests {
                 &asset,
                 "test memo",
                 sender.viewing_key(),
-                false,
+                hide_sender,
                 &mut rng,
             )
             .unwrap();
@@ -372,8 +375,8 @@ mod tests {
             };
             let as_receiver = decrypt_transact_as_receiver(receiver.as_ref(), &on_chain).unwrap();
             let as_sender = decrypt_transact_as_sender(sender.as_ref(), &on_chain).unwrap();
-            assert_eq!(as_receiver, expected, "{encryption:?}");
-            assert_eq!(as_sender, expected, "{encryption:?}");
+            assert_eq!(as_receiver, expected, "{encryption:?} {hide_sender}");
+            assert_eq!(as_sender, expected, "{encryption:?} {hide_sender}");
 
             // Not for a third party.
             let other = PrivateKeySigner::new_evm(
