@@ -36,7 +36,7 @@ use crate::{
     merkle_tree::UtxoMerkleTree,
     note::{
         Note,
-        encrypt::EncryptError,
+        encrypt::{EncryptError, NoteEncryption},
         operation::{Operation, OperationVerificationError},
         transfer::TransferNote,
         unshield::UnshieldNote,
@@ -58,6 +58,9 @@ pub struct TransactionBuilder {
 
     adapt_contract: Option<Address>,
     adapt_params: Option<[u8; 32]>,
+    /// Change notes go back to their signer under [`NoteEncryption::HybridPq`] with its own
+    /// KEM key, see [`Self::with_hybrid_change`].
+    hybrid_change: bool,
 }
 
 #[derive(Debug, Error)]
@@ -87,6 +90,8 @@ pub enum TransactionBuilderError {
     TransactCircuitInput(#[from] TransactCircuitInputsError),
     #[error("Operation verification error: {0}")]
     OperationVerification(#[from] OperationVerificationError),
+    #[error("Hybrid change notes were requested, but the signer of {from} has no ML-KEM key")]
+    ChangeNeedsKemKey { from: RailgunAddress },
 }
 
 #[derive(Clone)]
@@ -99,8 +104,14 @@ struct Intent {
 
 #[derive(Clone)]
 enum IntentKind {
-    Transfer { to: RailgunAddress, memo: String },
-    Unshield { to: Address },
+    Transfer {
+        to: RailgunAddress,
+        memo: String,
+        encryption: NoteEncryption,
+    },
+    Unshield {
+        to: Address,
+    },
 }
 
 impl TransactionBuilder {
@@ -110,19 +121,35 @@ impl TransactionBuilder {
             unshields: HashSet::new(),
             adapt_contract: None,
             adapt_params: None,
+            hybrid_change: false,
         }
     }
 }
 
 impl TransactionBuilder {
-    /// Adds a transfer operation to this transaction.
+    /// Adds a transfer operation to this transaction, encrypted the way every Railgun wallet
+    /// reads ([`NoteEncryption::Legacy`]).
     pub fn transfer(
+        self,
+        from: Arc<dyn RailgunSigner>,
+        to: RailgunAddress,
+        asset: AssetId,
+        value: u128,
+        memo: &str,
+    ) -> Self {
+        self.transfer_with_encryption(from, to, asset, value, memo, NoteEncryption::Legacy)
+    }
+
+    /// Adds a transfer operation whose note is encrypted with `encryption`, for instance
+    /// [`NoteEncryption::HybridPq`] with the receiver's published KEM key.
+    pub fn transfer_with_encryption(
         mut self,
         from: Arc<dyn RailgunSigner>,
         to: RailgunAddress,
         asset: AssetId,
         value: u128,
         memo: &str,
+        encryption: NoteEncryption,
     ) -> Self {
         self.intents.push(Intent {
             from,
@@ -131,8 +158,18 @@ impl TransactionBuilder {
             kind: IntentKind::Transfer {
                 to,
                 memo: memo.to_string(),
+                encryption,
             },
         });
+        self
+    }
+
+    /// Encrypts the change notes with [`NoteEncryption::HybridPq`] to their signer's own KEM
+    /// key. Building fails if a signer has none: the choice is never downgraded silently. Off
+    /// by default, so that wallets without the key (and legacy wallets on the same seed) keep
+    /// seeing the change.
+    pub fn with_hybrid_change(mut self) -> Self {
+        self.hybrid_change = true;
         self
     }
 
@@ -205,7 +242,7 @@ impl TransactionBuilder {
         rng: &mut impl CryptoRng,
     ) -> Result<Vec<Operation>, TransactionBuilderError> {
         let groups = self.group_intents();
-        let mut operations = build_groups(in_notes, groups, rng)?;
+        let mut operations = build_groups(in_notes, groups, self.hybrid_change, rng)?;
 
         for op in &mut operations {
             op.adapt_contract = self.adapt_contract;
@@ -237,11 +274,12 @@ impl TransactionBuilder {
 fn build_groups(
     in_notes: &[UtxoNote],
     groups: BTreeMap<(RailgunAddress, AssetId), Vec<Intent>>,
+    hybrid_change: bool,
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<Operation>, TransactionBuilderError> {
     let mut operations = Vec::new();
     for ((from, asset), intents) in groups {
-        let ops = build_group(in_notes, from, asset, intents, rng)?;
+        let ops = build_group(in_notes, from, asset, intents, hybrid_change, rng)?;
         operations.extend(ops);
     }
     Ok(operations)
@@ -253,6 +291,7 @@ fn build_group(
     from: RailgunAddress,
     asset: AssetId,
     mut intents: Vec<Intent>,
+    hybrid_change: bool,
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<Operation>, TransactionBuilderError> {
     // Sort intents smallest to largest. Helps to ensure small intents don't
@@ -305,7 +344,7 @@ fn build_group(
         for note in selected {
             op.add_in_note(note.clone());
         }
-        add_change_note(op, asset, rng);
+        add_change_note(op, asset, hybrid_change, rng)?;
     }
 
     Ok(operations.into_values().collect())
@@ -367,14 +406,21 @@ fn insert_operation(
         .or_insert(Operation::new_empty(tree, from, asset));
 
     match intent.kind {
-        IntentKind::Transfer { to, memo } => op.add_out_note(TransferNote::new(
-            intent.from.viewing_key(),
+        IntentKind::Transfer {
             to,
-            intent.asset,
-            intent.value,
-            rng.random(),
-            &memo,
-        )),
+            memo,
+            encryption,
+        } => op.add_out_note(
+            TransferNote::new(
+                intent.from.viewing_key(),
+                to,
+                intent.asset,
+                intent.value,
+                rng.random(),
+                &memo,
+            )
+            .with_encryption(encryption),
+        ),
         IntentKind::Unshield { to } => {
             op.set_unshield_note(UnshieldNote::new(to, intent.asset, intent.value))
         }
@@ -401,10 +447,27 @@ fn select_notes<'a>(notes: &'a [&UtxoNote], value: u128) -> Vec<&'a UtxoNote> {
 }
 
 /// Helper to add a change note to an operation if there is excess value.
-fn add_change_note(operation: &mut Operation, asset: AssetId, rng: &mut impl CryptoRng) {
+fn add_change_note(
+    operation: &mut Operation,
+    asset: AssetId,
+    hybrid_change: bool,
+    rng: &mut impl CryptoRng,
+) -> Result<(), TransactionBuilderError> {
     let signer = operation.from.clone();
     let change = operation.in_value().saturating_sub(operation.out_value());
     if change > 0 {
+        let encryption = if hybrid_change {
+            let Some(kem) = signer.kem_key_pair() else {
+                return Err(TransactionBuilderError::ChangeNeedsKemKey {
+                    from: signer.address(),
+                });
+            };
+            NoteEncryption::HybridPq {
+                receiver_kem_key: kem.encapsulation_key().clone(),
+            }
+        } else {
+            NoteEncryption::Legacy
+        };
         let change_note = TransferNote::new(
             signer.viewing_key(),
             signer.address(),
@@ -412,9 +475,11 @@ fn add_change_note(operation: &mut Operation, asset: AssetId, rng: &mut impl Cry
             change,
             rng.random(),
             "change",
-        );
+        )
+        .with_encryption(encryption);
         operation.add_out_note(change_note);
     }
+    Ok(())
 }
 
 async fn prove_operations(
@@ -592,6 +657,78 @@ mod tests {
 
     /// A gas estimate must not cost a confirmation on a hardware wallet, or a threshold
     /// signing ceremony.
+    /// The scheme is chosen per transfer; change notes are legacy unless asked otherwise, and
+    /// then take the signer's own KEM key or fail.
+    #[test]
+    fn encryption_is_chosen_per_note() {
+        use crate::{
+            account::chain::ChainId,
+            crypto::{kem::KemKeyPair, keys::ByteKey},
+        };
+
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other_kem = KemKeyPair::derive(b"other");
+        let notes = [note(&me, 0, 0, WETH, 100)];
+        let hybrid = NoteEncryption::HybridPq {
+            receiver_kem_key: other_kem.encapsulation_key().clone(),
+        };
+
+        let ops = TransactionBuilder::new()
+            .transfer(me.clone(), other.address(), WETH, 10, "legacy")
+            .transfer_with_encryption(me.clone(), other.address(), WETH, 20, "pq", hybrid.clone())
+            .operations(&notes, &mut rand::rng())
+            .unwrap();
+        let by_memo = |memo: &str| {
+            ops[0]
+                .transfer_notes()
+                .iter()
+                .find(|n| n.memo == memo)
+                .unwrap()
+                .encryption
+                .clone()
+        };
+        assert_eq!(by_memo("legacy"), NoteEncryption::Legacy);
+        assert_eq!(by_memo("pq"), hybrid);
+        assert_eq!(by_memo("change"), NoteEncryption::Legacy);
+
+        // Hybrid change needs the signer's own key.
+        let err = TransactionBuilder::new()
+            .transfer(me.clone(), other.address(), WETH, 10, "")
+            .with_hybrid_change()
+            .operations(&notes, &mut rand::rng())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            TransactionBuilderError::ChangeNeedsKemKey { .. }
+        ));
+
+        let my_kem = KemKeyPair::derive(b"me");
+        let me_pq = PrivateKeySigner::new_with_kem(
+            crate::crypto::keys::SpendingKey::from_bytes([1u8; 32]),
+            crate::crypto::keys::ViewingKey::from_bytes([2u8; 32]),
+            my_kem.clone(),
+            ChainId::evm(1),
+        );
+        let notes = [note(&me_pq, 0, 0, WETH, 100)];
+        let ops = TransactionBuilder::new()
+            .transfer(me_pq.clone(), other.address(), WETH, 10, "")
+            .with_hybrid_change()
+            .operations(&notes, &mut rand::rng())
+            .unwrap();
+        let change = ops[0]
+            .transfer_notes()
+            .iter()
+            .find(|n| n.memo == "change")
+            .unwrap();
+        assert_eq!(
+            change.encryption,
+            NoteEncryption::HybridPq {
+                receiver_kem_key: my_kem.encapsulation_key().clone()
+            }
+        );
+    }
+
     #[test]
     fn dummy_build_never_asks_the_signer() {
         let key = PrivateKeySigner::new_evm(random(), random(), 1);
