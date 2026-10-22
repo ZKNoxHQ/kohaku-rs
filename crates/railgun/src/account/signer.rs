@@ -5,8 +5,9 @@ use thiserror::Error;
 
 use crate::{
     account::{address::RailgunAddress, chain::ChainId},
-    crypto::keys::{
-        MasterPublicKey, SpendingKey, SpendingPublicKey, SpendingSignature, ViewingKey,
+    crypto::{
+        kem::KemKeyPair,
+        keys::{MasterPublicKey, SpendingKey, SpendingPublicKey, SpendingSignature, ViewingKey},
     },
 };
 
@@ -30,6 +31,13 @@ pub trait RailgunSigner: MaybeSend {
     fn spending_public_key(&self) -> SpendingPublicKey;
     async fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError>;
 
+    /// The ML-KEM key pair that receives post-quantum encrypted notes, if the account has one.
+    /// Like the viewing key, it is a scanning key: it crosses this interface and is not held by
+    /// a hardware signer.
+    fn kem_key_pair(&self) -> Option<&KemKeyPair> {
+        None
+    }
+
     fn master_public_key(&self) -> MasterPublicKey {
         MasterPublicKey::new(
             self.spending_public_key(),
@@ -50,6 +58,7 @@ pub trait RailgunSigner: MaybeSend {
 pub struct PrivateKeySigner {
     spending_key: SpendingKey,
     viewing_key: ViewingKey,
+    kem_key_pair: Option<KemKeyPair>,
     chain_id: ChainId,
 }
 
@@ -68,6 +77,22 @@ impl PrivateKeySigner {
         Arc::new(Self {
             spending_key,
             viewing_key,
+            kem_key_pair: None,
+            chain_id,
+        })
+    }
+
+    /// A signer that also receives post-quantum encrypted notes.
+    pub fn new_with_kem(
+        spending_key: SpendingKey,
+        viewing_key: ViewingKey,
+        kem_key_pair: KemKeyPair,
+        chain_id: ChainId,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            spending_key,
+            viewing_key,
+            kem_key_pair: Some(kem_key_pair),
             chain_id,
         })
     }
@@ -91,6 +116,10 @@ impl RailgunSigner for PrivateKeySigner {
 
     fn viewing_key(&self) -> ViewingKey {
         self.viewing_key
+    }
+
+    fn kem_key_pair(&self) -> Option<&KemKeyPair> {
+        self.kem_key_pair.as_ref()
     }
 
     async fn sign(&self, inputs: U256) -> Result<SpendingSignature, RailgunSignerError> {

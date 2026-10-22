@@ -10,7 +10,7 @@ use crate::{
     merkle_tree::UtxoLeafHash,
     note::{
         EncryptableNote, Note,
-        encrypt::{EncryptError, encrypt_note},
+        encrypt::{EncryptError, NoteEncryption, encrypt_transact},
     },
 };
 
@@ -23,6 +23,13 @@ pub struct TransferNote {
     pub value: u128,
     pub random: [u8; 16],
     pub memo: String,
+    /// How the note is encrypted for `to`; [`NoteEncryption::Legacy`] unless chosen otherwise.
+    pub encryption: NoteEncryption,
+    /// Blind the sender's viewing key with a random the receiver does not get, so that whoever
+    /// opens the note cannot tell which account sent it. Off by default: Railgun wallets show
+    /// the sender to the receiver. On for notes whose receiver has no business knowing, such as
+    /// fee notes.
+    pub hide_sender: bool,
 }
 
 impl TransferNote {
@@ -41,20 +48,35 @@ impl TransferNote {
             value,
             random,
             memo: memo.to_string(),
+            encryption: NoteEncryption::default(),
+            hide_sender: false,
         }
+    }
+
+    /// Hides the sender from whoever opens the note, see [`Self::hide_sender`].
+    pub fn with_hidden_sender(mut self) -> Self {
+        self.hide_sender = true;
+        self
+    }
+
+    /// Encrypts the note with `encryption` instead of the legacy scheme.
+    pub fn with_encryption(mut self, encryption: NoteEncryption) -> Self {
+        self.encryption = encryption;
+        self
     }
 }
 
 impl EncryptableNote for TransferNote {
     fn encrypt(&self, rng: &mut dyn CryptoRng) -> Result<CommitmentCiphertext, EncryptError> {
-        encrypt_note(
+        encrypt_transact(
+            &self.encryption,
             &self.to,
             &self.random,
             self.value,
             &self.asset,
             &self.memo,
             self.from_key,
-            false,
+            self.hide_sender,
             rng,
         )
     }

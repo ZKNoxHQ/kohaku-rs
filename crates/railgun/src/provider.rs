@@ -31,7 +31,7 @@ use crate::{
         types::{BlindedCommitmentType, ListKey, OperationPoi, PoiStatus},
     },
     transact::{
-        ShieldBuilder, TransactionBuilder, TransactionBuilderError,
+        NoteEncryption, ShieldBuilder, TransactionBuilder, TransactionBuilderError,
         proved_transaction::{ProvedOperation, ProvedTx},
     },
 };
@@ -526,12 +526,16 @@ impl RailgunProvider {
         let fee_asset = AssetId::Erc20(fee_token);
         let adapted = builder
             .adapt(railgun_fee_adapter, *sender.address().into_word())
-            .transfer(
+            // The paymaster checks the fee from `paymasterData`, it has no use for the sender:
+            // hidden, so that opening the fee note does not tell which account paid.
+            .transfer_with(
                 fee_payer,
                 paymaster_railgun_address(ChainId::evm(self.chain.id)),
                 fee_asset,
                 fee,
                 "fee",
+                NoteEncryption::Legacy,
+                true,
             );
         let spendable = self.spendable_notes().await;
         let built = adapted
@@ -591,12 +595,16 @@ impl RailgunProvider {
         // The one proof. This is the only place the spending signer is used.
         let adapted = builder
             .adapt(railgun_fee_adapter, *sender.address().into_word())
-            .transfer(
+            // The paymaster checks the fee from `paymasterData`, it has no use for the sender:
+            // hidden, so that opening the fee note does not tell which account paid.
+            .transfer_with(
                 fee_payer,
                 paymaster_railgun_address(ChainId::evm(self.chain.id)),
                 fee_asset,
                 fee,
                 "fee",
+                NoteEncryption::Legacy,
+                true,
             );
         let operations = self.build_operation(adapted, rng).await?;
         let signable = self
@@ -959,12 +967,14 @@ impl RailgunProvider {
 
         info!("Iteratively building UserOperation to converge on accurate fee estimate");
         for _ in 0..5 {
-            let broadcast_builder = builder.clone().transfer(
+            let broadcast_builder = builder.clone().transfer_with(
                 fee_payer.clone(),
                 paymaster_railgun_address,
                 fee_asset,
                 fee_value,
                 "fee",
+                NoteEncryption::Legacy,
+                true,
             );
 
             info!(
