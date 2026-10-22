@@ -1215,3 +1215,7 @@ mod submission_control_tests {
         task.await.unwrap();
     }
 }
+
+#[cfg(all(test, native))]
+#[path = "fresh_proof_tests.rs"]
+mod fresh_proof_tests;

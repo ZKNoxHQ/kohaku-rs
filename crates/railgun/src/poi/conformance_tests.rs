@@ -754,3 +754,38 @@ async fn cancellation_during_acquisition_preserves_the_saved_checkpoint() {
     }
     service.close().await;
 }
+
+/// Independently check a freshly generated payload, then exercise the real client wire path.
+pub(super) async fn assert_fresh_submission(data: TransactProofData) {
+    assert!(verify(&data, &key("current-3x3")).unwrap());
+    assert!(!verify(&data, &key("retired-3x3")).unwrap());
+    let mut changed = data.clone();
+    changed.txid_merkleroot =
+        (<U256 as From<_>>::from(data.txid_merkleroot) + U256::from(1)).into();
+    assert!(!verify(&changed, &key("current-3x3")).unwrap());
+
+    let service = Service::new().await;
+    let client = service.client();
+    let output = data.blinded_commitments_out[0];
+    let refused = timeout(
+        Duration::from_secs(5),
+        client.submit_proof([(LIST.into(), changed)].into()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(refused, Err(PoiClientError::Rpc(error)) if error.code == -32602));
+    assert!(service.state.lock().unwrap().accepted.is_empty());
+    timeout(
+        Duration::from_secs(5),
+        client.submit_proof([(LIST.into(), data)].into()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        service.state.lock().unwrap().accepted,
+        HashSet::from([output])
+    );
+    assert_eq!(service.state.lock().unwrap().methods.len(), 2);
+    service.close().await;
+}

@@ -33,6 +33,13 @@ pub enum Groth16ProverError {
 }
 
 impl Groth16Prover {
+    #[cfg(all(test, native))]
+    pub(crate) fn with_test_artifacts(base_url: &str) -> Self {
+        Self {
+            artifact_loader: RemoteArtifactLoader::new(base_url),
+        }
+    }
+
     pub fn new() -> Self {
         let artifact_loader = RemoteArtifactLoader::default();
         Groth16Prover { artifact_loader }
