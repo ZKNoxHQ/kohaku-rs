@@ -33,11 +33,11 @@ impl DatabaseError {
 #[cfg_attr(wasm, async_trait::async_trait(?Send))]
 pub trait RailgunDB: crate::common::MaybeSend {
     async fn get_utxo_indexer(&self) -> Result<UtxoIndexerState, DatabaseError>;
-    async fn set_utxo_indexer(&self, state: &UtxoIndexerState) -> Result<(), DatabaseError>;
     async fn get_account(
         &self,
         addr: &RailgunAddress,
     ) -> Result<IndexedAccountState, DatabaseError>;
+    #[cfg(test)]
     async fn set_account(
         &self,
         addr: &RailgunAddress,
@@ -47,11 +47,6 @@ pub trait RailgunDB: crate::common::MaybeSend {
         &self,
         tree_number: u32,
     ) -> Result<Option<MerkleTreeState>, DatabaseError>;
-    async fn set_utxo_tree(
-        &self,
-        tree_number: u32,
-        state: MerkleTreeState,
-    ) -> Result<(), DatabaseError>;
     async fn get_txid_indexer(&self) -> Result<TxidIndexerState, DatabaseError>;
     async fn get_txid_tree(
         &self,
@@ -79,10 +74,6 @@ impl RailgunDB for Store {
         deserialize_envelope(&bytes, 1)
     }
 
-    async fn set_utxo_indexer(&self, state: &UtxoIndexerState) -> Result<(), DatabaseError> {
-        write_envelope(self, &utxo_indexer_key(), 1, state).await
-    }
-
     async fn get_account(
         &self,
         addr: &RailgunAddress,
@@ -95,6 +86,7 @@ impl RailgunDB for Store {
         deserialize_envelope(&bytes, 1)
     }
 
+    #[cfg(test)]
     async fn set_account(
         &self,
         addr: &RailgunAddress,
@@ -113,14 +105,6 @@ impl RailgunDB for Store {
         };
 
         deserialize_envelope(&bytes, 1).map(Some)
-    }
-
-    async fn set_utxo_tree(
-        &self,
-        tree_number: u32,
-        state: MerkleTreeState,
-    ) -> Result<(), DatabaseError> {
-        write_envelope(self, &utxo_tree_key(tree_number), 1, &state).await
     }
 
     async fn get_txid_indexer(&self) -> Result<TxidIndexerState, DatabaseError> {
@@ -204,6 +188,26 @@ pub(crate) async fn write_txid_snapshot(
         writes.push((txid_tree_key(*number), serialize_envelope(1, tree)?));
     }
     writes.push((txid_indexer_key(), serialize_envelope(1, state)?));
+    store.put_batch(writes).await?;
+    Ok(())
+}
+
+/// One verified UTXO snapshot, including account notes and every cursor. The existing
+/// version-1 keys/envelopes are unchanged; `Store::put_batch` requires atomicity.
+pub(crate) async fn write_utxo_snapshot(
+    store: &Store,
+    state: &UtxoIndexerState,
+    trees: &[(u32, MerkleTreeState)],
+    accounts: &[(RailgunAddress, IndexedAccountState)],
+) -> Result<(), DatabaseError> {
+    let mut writes = Vec::with_capacity(trees.len() + accounts.len() + 1);
+    for (number, tree) in trees {
+        writes.push((utxo_tree_key(*number), serialize_envelope(1, tree)?));
+    }
+    for (address, account) in accounts {
+        writes.push((account_key(address), serialize_envelope(1, account)?));
+    }
+    writes.push((utxo_indexer_key(), serialize_envelope(1, state)?));
     store.put_batch(writes).await?;
     Ok(())
 }
