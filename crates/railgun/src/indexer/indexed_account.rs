@@ -79,7 +79,25 @@ impl IndexedAccount {
         self.inner.synced_block = block;
     }
 
+    // A lagging/new account can make the indexer reacquire a range that other accounts
+    // already processed. Replaying the same position must not duplicate or resurrect notes.
+    fn knows_position(&self, tree_number: u32, leaf_index: u32) -> bool {
+        self.inner
+            .notes
+            .iter()
+            .chain(&self.inner.spent)
+            .any(|note| note.tree_number == tree_number && note.leaf_index == leaf_index)
+            || self
+                .inner
+                .sent
+                .iter()
+                .any(|note| note.tree_number == tree_number && note.leaf_index == leaf_index)
+    }
+
     pub fn handle_shield_event(&mut self, event: &syncer::Shield) -> Result<(), NoteError> {
+        if self.knows_position(event.tree_number, event.leaf_index) {
+            return Ok(());
+        }
         let note = UtxoNote::decrypt_shield(self.signer.clone(), event);
         let note = match note {
             Err(NoteError::Aes(_)) => {
@@ -102,6 +120,9 @@ impl IndexedAccount {
     }
 
     pub fn handle_transact_event(&mut self, event: &syncer::Transact) -> Result<(), NoteError> {
+        if self.knows_position(event.tree_number, event.leaf_index) {
+            return Ok(());
+        }
         let note = UtxoNote::decrypt_transact(self.signer.clone(), &event);
 
         let note = match note {
@@ -186,6 +207,7 @@ mod tests {
             annotation_data: ciphertext.annotationData.to_vec(),
         };
         account.handle_transact_event(&event).unwrap();
+        account.handle_transact_event(&event).unwrap();
 
         assert!(account.unspent().is_empty());
         let sent = account.sent();
@@ -230,17 +252,17 @@ mod tests {
             "",
         );
         let ct = change.encrypt(rng).unwrap();
-        account
-            .handle_transact_event(&syncer::Transact {
-                tree_number: 0,
-                leaf_index: 9,
-                hash: change.hash().into(),
-                ciphertext: ct.clone().into(),
-                blinded_sender_viewing_key: *ct.blindedSenderViewingKey,
-                blinded_receiver_viewing_key: *ct.blindedReceiverViewingKey,
-                annotation_data: ct.annotationData.to_vec(),
-            })
-            .unwrap();
+        let change_event = syncer::Transact {
+            tree_number: 0,
+            leaf_index: 9,
+            hash: change.hash().into(),
+            ciphertext: ct.clone().into(),
+            blinded_sender_viewing_key: *ct.blindedSenderViewingKey,
+            blinded_receiver_viewing_key: *ct.blindedReceiverViewingKey,
+            annotation_data: ct.annotationData.to_vec(),
+        };
+        account.handle_transact_event(&change_event).unwrap();
+        account.handle_transact_event(&change_event).unwrap();
         let note = account.unspent().pop().unwrap();
         account.handle_nullified_event(
             &syncer::Nullified {
@@ -249,6 +271,7 @@ mod tests {
             },
             0,
         );
+        account.handle_transact_event(&change_event).unwrap();
         assert!(account.unspent().is_empty());
         assert_eq!(account.spent().len(), 1);
         assert_eq!(account.spent()[0].leaf_index, 9);

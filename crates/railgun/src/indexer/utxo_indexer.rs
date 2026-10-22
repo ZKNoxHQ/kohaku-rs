@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
-    u64,
 };
 
 use kohaku_kv_store::Store;
@@ -17,7 +16,7 @@ use crate::{
     },
     merkle_tree::{MerkleTreeVerifier, UtxoLeafHash, UtxoMerkleTree},
     note::utxo::{NoteError, UtxoNote},
-    railgun_database::{DatabaseError, RailgunDB},
+    railgun_database::{DatabaseError, RailgunDB, write_utxo_snapshot},
 };
 
 /// Utxo indexer that maintains the set of UTXO merkle trees and tracks accounts
@@ -167,12 +166,13 @@ impl UtxoIndexer {
         let events = self.utxo_syncer.sync(from_block, to_block).await?;
         info!("Fetched {} events from syncer", events.len());
 
+        let mut candidate = self.stage();
         let mut tree_leaves: HashMap<u32, Vec<(u32, UtxoLeafHash)>> = HashMap::new();
         for (i, event) in events.iter().enumerate() {
             if i % 20000 == 0 {
                 info!("Processing event {}/{}", i, events.len());
             }
-            self.handle_event(&event, &mut tree_leaves)?;
+            candidate.handle_event(&event, &mut tree_leaves)?;
         }
 
         info!("Inserting leaves into UTXO trees");
@@ -181,7 +181,8 @@ impl UtxoIndexer {
             let start = leaves[0].0;
             let hashes: Vec<_> = leaves.into_iter().map(|(_, hash)| hash).collect();
 
-            self.utxo_trees
+            candidate
+                .utxo_trees
                 .entry(tree_number)
                 .or_insert(UtxoMerkleTree::new(tree_number))
                 .insert_leaves(&hashes, start as usize);
@@ -189,18 +190,40 @@ impl UtxoIndexer {
 
         // Verify
         info!("Verifying UTXO trees");
-        self.verify().await?;
+        candidate.verify().await?;
 
         info!("Synced to block {}", to_block);
-        self.synced_block = to_block;
-        for account in self.accounts.iter_mut() {
+        candidate.synced_block = to_block;
+        for account in candidate.accounts.iter_mut() {
             account.set_synced_block(to_block);
         }
 
         // Save
-        self.save().await?;
+        candidate.save().await?;
+
+        *self = candidate;
 
         Ok(())
+    }
+
+    /// Isolate decrypted notes and tree changes until validation and the atomic save complete.
+    fn stage(&self) -> Self {
+        Self {
+            synced_block: self.synced_block,
+            utxo_trees: self
+                .utxo_trees
+                .iter()
+                .map(|(number, tree)| (*number, UtxoMerkleTree::from_state(tree.state())))
+                .collect(),
+            accounts: self
+                .accounts
+                .iter()
+                .map(|account| IndexedAccount::from_state(account.signer(), account.state()))
+                .collect(),
+            db: self.db.clone(),
+            utxo_syncer: self.utxo_syncer.clone(),
+            utxo_verifier: self.utxo_verifier.clone(),
+        }
     }
 
     fn handle_event(
@@ -299,29 +322,23 @@ impl UtxoIndexer {
         Ok(())
     }
 
-    /// Saves the current state of the indexer to the database.
-    ///
-    /// Trees are written before the synced block: if the process stops in between, the next run
-    /// resumes from the older block and re-inserts the same leaves (idempotent), instead of
-    /// believing it is synced while the saved tree lacks them.
+    /// Save trees, account notes and all cursors in one backend-atomic batch.
     async fn save(&self) -> Result<(), DatabaseError> {
-        for (tree_number, tree) in self.utxo_trees.iter() {
-            self.db.set_utxo_tree(*tree_number, tree.state()).await?;
-        }
-
+        let trees: Vec<_> = self
+            .utxo_trees
+            .iter()
+            .map(|(number, tree)| (*number, tree.state()))
+            .collect();
+        let accounts: Vec<_> = self
+            .accounts
+            .iter()
+            .map(|account| (account.address(), account.state()))
+            .collect();
         let state = UtxoIndexerState {
             synced_block: self.synced_block,
-            trees: self.utxo_trees.keys().cloned().collect(),
+            trees: self.utxo_trees.keys().copied().collect(),
         };
-        self.db.set_utxo_indexer(&state).await?;
-
-        for account in self.accounts.iter() {
-            self.db
-                .set_account(&account.address(), &account.state())
-                .await?;
-        }
-
-        Ok(())
+        write_utxo_snapshot(&self.db, &state, &trees, &accounts).await
     }
 }
 
@@ -479,3 +496,7 @@ mod tests {
         assert_eq!(reloaded.utxo_trees.get(&0).map(|t| t.leaves_len()), Some(1));
     }
 }
+
+#[cfg(all(test, native))]
+#[path = "utxo_snapshot_tests.rs"]
+mod snapshot_tests;
