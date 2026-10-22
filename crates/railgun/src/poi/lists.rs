@@ -20,6 +20,12 @@ use crate::{
 
 /// One request, matching the node's cap on `ppoi_poi_merkletree_leaves`.
 const LEAF_PAGE: u64 = 100;
+/// Pages applied, validated and saved together. A save writes each touched tree whole (up to
+/// 65,536 leaves and every level above them), so saving after each page made the first copy of
+/// a long list slow down as each tree filled. A failed batch costs at most this many pages again.
+const BATCH_PAGES: u64 = 20;
+/// Leaf requests in flight while a batch is fetched.
+const PARALLEL_FETCHES: usize = 4;
 /// Extra attempts after the first failure, same budget as the Subsquid syncer.
 const MAX_RETRIES: usize = 3;
 
@@ -115,45 +121,99 @@ impl PoiLists {
         client: &impl PoiNodeClient,
         list_key: &ListKey,
     ) -> Result<(), PoiSyncError> {
+        use futures::StreamExt;
+
         if let Some(list) = self.lists.get_mut(list_key) {
             list.caught_up = false;
         }
+        // The first batch is one page, so a list that is already caught up costs one request.
+        // After a rejected batch, one page at a time keeps the prefix the node accepts.
+        let mut batch_pages = 1;
+        let mut narrowed = false;
         loop {
             let start = self.next_index(list_key);
-            let Some(end) = start.checked_add(LEAF_PAGE) else {
+            let ranges: Vec<(u64, u64)> = (0..batch_pages)
+                .map_while(|i| {
+                    let page_start = start.checked_add(i * LEAF_PAGE)?;
+                    Some((page_start, page_start.checked_add(LEAF_PAGE)?))
+                })
+                .collect();
+            let Some(&(_, span_end)) = ranges.last() else {
                 return Ok(());
             };
+            let mut pages = futures::stream::iter(ranges.iter().map(|&(page_start, page_end)| {
+                async move {
+                    let page =
+                        retry(|| client.merkletree_leaves(list_key, page_start, page_end)).await;
+                    (page_start, page_end, page)
+                }
+            }))
+            .buffered(PARALLEL_FETCHES);
 
-            let page = retry(|| client.merkletree_leaves(list_key, start, end)).await?;
-            let expected = (end - start) as usize;
-            let zero_at = page.iter().position(|leaf| is_poi_empty_leaf(*leaf));
-            if page.len() < expected && zero_at.is_none() {
-                return Err(PoiSyncError::ShortPage {
-                    list_key: list_key.clone(),
-                    start,
-                    end,
-                    got: page.len(),
-                });
-            }
-            let real_len = zero_at.unwrap_or(page.len());
-            let real = &page[..real_len];
-            if real.is_empty() {
+            // Applied in order; the first page that is not full ends the batch.
+            let snapshots = self.snapshot(list_key, start, (span_end - start) as usize);
+            let mut previous = Vec::new();
+            let mut roots = Vec::new();
+            let mut cursor = start;
+            let mut pages_applied = 0;
+            let mut stopped = None;
+            let mut end_reached = false;
+            while let Some((page_start, page_end, page)) = pages.next().await {
+                let page = match page {
+                    Ok(page) => page,
+                    Err(err) => {
+                        stopped = Some(PoiSyncError::from(err));
+                        break;
+                    }
+                };
+                let expected = (page_end - page_start) as usize;
+                let zero_at = page.iter().position(|leaf| is_poi_empty_leaf(*leaf));
+                if page.len() < expected && zero_at.is_none() {
+                    stopped = Some(PoiSyncError::ShortPage {
+                        list_key: list_key.clone(),
+                        start: page_start,
+                        end: page_end,
+                        got: page.len(),
+                    });
+                    break;
+                }
+                let real_len = zero_at.unwrap_or(page.len());
+                let real = &page[..real_len];
+                if real.is_empty() {
+                    end_reached = true;
+                    break;
+                }
+
+                previous.extend(self.previous_positions(list_key, real));
                 self.lists
                     .get_mut(list_key)
                     .expect("POI list loaded at startup")
-                    .caught_up = true;
-                info!("POI list {list_key} is synced at leaf {start}");
+                    .insert_range(page_start, real);
+                // Every page's roots, as when the pages were checked one by one.
+                roots.extend(self.roots(list_key, &touched_trees(page_start, real_len)));
+                cursor = page_start + real_len as u64;
+                pages_applied += 1;
+                if real_len < page.len() {
+                    end_reached = true;
+                    break;
+                }
+            }
+            drop(pages);
+
+            if pages_applied == 0 {
+                if let Some(err) = stopped {
+                    return Err(err);
+                }
+                if end_reached {
+                    self.lists
+                        .get_mut(list_key)
+                        .expect("POI list loaded at startup")
+                        .caught_up = true;
+                    info!("POI list {list_key} is synced at leaf {start}");
+                }
                 return Ok(());
             }
 
-            let snapshots = self.snapshot(list_key, start, real.len());
-            let previous = self.previous_positions(list_key, real);
-            self.lists
-                .get_mut(list_key)
-                .expect("POI list loaded at startup")
-                .insert_range(start, real);
-
-            let roots = self.roots(list_key, &snapshots);
             let accepted = match retry(|| client.validate_poi_merkleroots(list_key, &roots)).await {
                 Ok(accepted) => accepted,
                 Err(err) => {
@@ -163,34 +223,43 @@ impl PoiLists {
             };
             if !accepted {
                 self.restore(list_key, snapshots, previous);
+                if pages_applied > 1 {
+                    batch_pages = 1;
+                    narrowed = true;
+                    continue;
+                }
                 return Err(PoiSyncError::RootRejected {
                     list_key: list_key.clone(),
                 });
             }
 
-            let cursor = self.next_index(list_key);
-            let synced_through = start + real_len as u64;
             self.lists
                 .get_mut(list_key)
                 .expect("POI list loaded at startup")
-                .next_index = synced_through;
-            let tree_numbers: Vec<u32> = snapshots.iter().map(|(number, _)| *number).collect();
+                .next_index = cursor;
+            let tree_numbers = touched_trees(start, (cursor - start) as usize);
             if let Err(err) = self.persist(list_key, &tree_numbers).await {
                 self.restore(list_key, snapshots, previous);
                 self.lists
                     .get_mut(list_key)
                     .expect("POI list loaded at startup")
-                    .next_index = cursor;
+                    .next_index = start;
                 return Err(err);
             }
-            info!("Synced POI list {list_key} through leaf {synced_through}");
+            info!("Synced POI list {list_key} through leaf {cursor}");
 
-            if real_len < page.len() {
+            if let Some(err) = stopped {
+                return Err(err);
+            }
+            if end_reached {
                 self.lists
                     .get_mut(list_key)
                     .expect("POI list loaded at startup")
                     .caught_up = true;
                 return Ok(());
+            }
+            if !narrowed {
+                batch_pages = BATCH_PAGES;
             }
         }
     }
@@ -223,15 +292,11 @@ impl PoiLists {
             .collect()
     }
 
-    fn roots(
-        &self,
-        list_key: &ListKey,
-        snapshots: &[(u32, Option<PoiMerkleTreeState>)],
-    ) -> Vec<MerkleRoot> {
+    fn roots(&self, list_key: &ListKey, tree_numbers: &[u32]) -> Vec<MerkleRoot> {
         let list = &self.lists[list_key];
-        snapshots
+        tree_numbers
             .iter()
-            .filter_map(|(number, _)| list.trees.get(number).map(|tree| tree.root()))
+            .filter_map(|number| list.trees.get(number).map(|tree| tree.root()))
             .collect()
     }
 
@@ -245,7 +310,8 @@ impl PoiLists {
             .lists
             .get_mut(list_key)
             .expect("POI list loaded at startup");
-        for (commitment, position) in previous {
+        // Newest first: a commitment seen twice in one batch ends at its position before both.
+        for (commitment, position) in previous.into_iter().rev() {
             match position {
                 Some(position) => {
                     list.index.insert(commitment, position);
@@ -399,6 +465,9 @@ mod tests {
         accept_roots: AtomicBool,
         /// Accept this many root checks, then reject. `None` follows `accept_roots`.
         accept_prefix: Mutex<Option<usize>>,
+        /// Roots the node has published, as a real node: a check passes when all are in it.
+        /// `None` follows `accept_prefix` and `accept_roots`.
+        published: Mutex<Option<Vec<MerkleRoot>>>,
         root_checks: AtomicUsize,
         pages: LeafPages,
     }
@@ -421,6 +490,7 @@ mod tests {
                 leaves: Mutex::new(leaves),
                 accept_roots: AtomicBool::new(accept_roots),
                 accept_prefix: Mutex::new(None),
+                published: Mutex::new(None),
                 root_checks: AtomicUsize::new(0),
                 pages,
             }
@@ -428,6 +498,21 @@ mod tests {
 
         fn reject_after(&self, accepted: usize) {
             *self.accept_prefix.lock().unwrap() = Some(accepted);
+        }
+
+        /// Publishes the root after each of the first `count` leaves (all in tree 0).
+        fn publish_through(&self, count: usize) {
+            let leaves = self.leaves.lock().unwrap();
+            let mut tree = PoiMerkleTree::new(0);
+            let roots = leaves[..count]
+                .iter()
+                .enumerate()
+                .map(|(i, leaf)| {
+                    tree.insert_leaves(&[*leaf], i);
+                    tree.root()
+                })
+                .collect();
+            *self.published.lock().unwrap() = Some(roots);
         }
 
         fn set_leaves(&self, leaves: Vec<U256>) {
@@ -472,9 +557,12 @@ mod tests {
         async fn validate_poi_merkleroots(
             &self,
             _list_key: &ListKey,
-            _roots: &[MerkleRoot],
+            roots: &[MerkleRoot],
         ) -> Result<bool, PoiClientError> {
             let n = self.root_checks.fetch_add(1, Ordering::Relaxed);
+            if let Some(published) = &*self.published.lock().unwrap() {
+                return Ok(roots.iter().all(|root| published.contains(root)));
+            }
             if let Some(prefix) = *self.accept_prefix.lock().unwrap() {
                 return Ok(n < prefix);
             }
@@ -599,6 +687,114 @@ mod tests {
         assert_eq!(lists.next_index(&key), 0);
         assert!(!lists.caught_up(&key));
         assert!(!lists.contains(&key, BlindedCommitment::from(U256::from(1u8))));
+    }
+
+    fn leaves(count: u32) -> Vec<U256> {
+        (1..=count).map(U256::from).collect()
+    }
+
+    /// Counts snapshot saves.
+    struct CountWrites {
+        inner: MemoryStore,
+        writes: std::sync::Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl KvStoreBackend for CountWrites {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+            self.inner.get_batch(keys).await
+        }
+        async fn put_batch(&self, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            self.inner.put_batch(entries).await
+        }
+        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
+            self.inner.delete_batch(keys).await
+        }
+    }
+
+    /// 4,250 leaves: one page, then batches of 20 pages. Four root checks and four saves where
+    /// page by page took 43 of each, and the same tree.
+    #[tokio::test]
+    async fn a_long_list_is_copied_in_batches() {
+        let writes = std::sync::Arc::new(AtomicUsize::new(0));
+        let db = Store::new(CountWrites {
+            inner: MemoryStore::new(),
+            writes: writes.clone(),
+        });
+        let key = list_key();
+        let all = leaves(4_250);
+        let node = FakeNode::new(all.clone(), true);
+        node.publish_through(all.len());
+        let mut lists = PoiLists::load(db.clone(), &[key.clone()]).await.unwrap();
+
+        lists.sync(&node).await.unwrap();
+        assert_eq!(lists.next_index(&key), 4_250);
+        assert!(lists.caught_up(&key));
+        assert_eq!(node.root_checks.load(Ordering::Relaxed), 4);
+        assert_eq!(writes.load(Ordering::Relaxed), 4);
+
+        let mut expected = PoiMerkleTree::new(0);
+        expected.insert_leaves(&all, 0);
+        let reloaded = PoiLists::load(db, &[key.clone()]).await.unwrap();
+        assert_eq!(reloaded.next_index(&key), 4_250);
+        for leaf in [1u32, 2_100, 4_250] {
+            let proof = reloaded
+                .proof(&key, BlindedCommitment::from(U256::from(leaf)))
+                .unwrap();
+            assert!(proof.verify());
+            assert_eq!(proof.root, expected.root());
+        }
+
+        // Caught up: one more request and nothing to check.
+        lists.sync(&node).await.unwrap();
+        assert_eq!(node.root_checks.load(Ordering::Relaxed), 4);
+    }
+
+    /// The node has published roots through leaf 1,300 only: the batch from 100 is rejected,
+    /// then retried page by page, which keeps everything up to 1,300.
+    #[tokio::test]
+    async fn a_rejected_batch_keeps_the_accepted_pages() {
+        let db = Store::create();
+        let key = list_key();
+        let node = FakeNode::new(leaves(2_500), true);
+        node.publish_through(1_300);
+        let mut lists = PoiLists::load(db.clone(), &[key.clone()]).await.unwrap();
+
+        let err = lists.sync(&node).await.unwrap_err();
+        assert!(matches!(err, PoiSyncError::RootRejected { .. }));
+        assert_eq!(lists.next_index(&key), 1_300);
+        assert!(!lists.caught_up(&key));
+        assert!(lists.contains(&key, BlindedCommitment::from(U256::from(1_300u32))));
+        assert!(!lists.contains(&key, BlindedCommitment::from(U256::from(1_301u32))));
+
+        let reloaded = PoiLists::load(db, &[key.clone()]).await.unwrap();
+        assert_eq!(reloaded.next_index(&key), 1_300);
+        assert!(
+            reloaded
+                .proof(&key, BlindedCommitment::from(U256::from(1_300u32)))
+                .unwrap()
+                .verify()
+        );
+    }
+
+    /// A commitment present twice in a rejected batch is gone after the rollback, as it was
+    /// before the batch.
+    #[tokio::test]
+    async fn a_rollback_forgets_a_commitment_repeated_in_the_batch() {
+        let db = Store::create();
+        let key = list_key();
+        let mut all = leaves(400);
+        let repeated = U256::from(9_999u32);
+        all[150] = repeated;
+        all[250] = repeated;
+        let node = FakeNode::new(all, true);
+        node.reject_after(1);
+        let mut lists = PoiLists::load(db, &[key.clone()]).await.unwrap();
+
+        let err = lists.sync(&node).await.unwrap_err();
+        assert!(matches!(err, PoiSyncError::RootRejected { .. }));
+        assert_eq!(lists.next_index(&key), 100);
+        assert!(!lists.contains(&key, BlindedCommitment::from(repeated)));
     }
 
     struct FailWrites {
