@@ -683,7 +683,7 @@ impl RailgunProvider {
                 limit: pmv_limit,
             });
         }
-        let bundler_view = bundler.estimate_gas(&signable).await?;
+        let bundler_view = bundler.estimate_gas(&signable, None).await?;
         for (what, needed, limit) in [
             (
                 "pre-verification",
@@ -1053,7 +1053,7 @@ impl RailgunProvider {
                 .map_err(|e| RailgunProviderError::Other(Box::new(e)))?
                 .with_call(&calldata)
                 .with_paymaster_and_data(privacy_paymaster, Bytes::from(paymaster_data))
-                .with_gas_estimate(bundler)
+                .with_gas_estimate(bundler, None)
                 .await?
                 .build();
 
@@ -1275,6 +1275,12 @@ mod abi {
 
 #[cfg(all(test, native))]
 mod poi_availability_tests {
+    use alloy::providers::Provider;
+    use tokio::{
+        net::TcpListener,
+        time::{Duration, timeout},
+    };
+
     use super::*;
     use crate::{
         account::signer::PrivateKeySigner,
@@ -1285,13 +1291,8 @@ mod poi_availability_tests {
             syncer::{SyncEvent, SyncerError, UtxoSyncer},
         },
         railgun_database::RailgunDB,
+        state::RailgunState,
         transact::SpendError,
-    };
-    use alloy::providers::Provider;
-    use kohaku_kv_store::Store;
-    use tokio::{
-        net::TcpListener,
-        time::{Duration, timeout},
     };
 
     const LIST: &str = "public-fixture-list";
@@ -1323,7 +1324,7 @@ mod poi_availability_tests {
             11_155_111,
         );
         let asset = AssetId::erc20(Address::repeat_byte(0x11));
-        let db = Store::create();
+        let db = RailgunState::default();
         db.set_account(
             &signer.address(),
             &IndexedAccountState {
@@ -1354,7 +1355,7 @@ mod poi_availability_tests {
             .connect_http(url.parse().unwrap())
             .erased();
         let builder = RailgunBuilder::new(chain, rpc)
-            .with_database(db)
+            .with_state(db)
             .with_utxo_syncer(Arc::new(NoSync));
         // The built-in prover's artifact loader is not injectable yet. A failed
         // status must stop build before that loader can be reached.

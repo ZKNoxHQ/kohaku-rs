@@ -24,7 +24,8 @@ use crate::{
     railgun_database::write_poi_snapshot,
 };
 
-// Compressed files in the production loader's pinned artifact commit 98e6a5255ae4a12bcc1fdaa8ba3bfcf2e805166d.
+// Compressed files in the production loader's pinned artifact commit
+// 98e6a5255ae4a12bcc1fdaa8ba3bfcf2e805166d.
 const ARTIFACTS: [(&str, &str); 3] = [
     (
         "proving_key.bin.br",
@@ -183,7 +184,7 @@ async fn fresh_case(has_unshield: bool) {
     let txid = entry.txid;
     let mut poi_tree = PoiMerkleTree::new(0);
     poi_tree.insert_leaves(&[U256::from(1), U256::from(2), input.blinded_commitment], 0);
-    let store = Store::create();
+    let store = RailgunState::default();
     write_poi_snapshot(&store, &entry.list_keys[0], 3, &[(0, poi_tree.state())])
         .await
         .unwrap();
@@ -275,7 +276,8 @@ fn public_entry(has_unshield: bool) -> (PendingPoiEntry, UtxoNote, UtxoNote) {
     let bound_params_hash = U256::from(17);
     let mut out_commitments = vec![output.hash.into()];
     if has_unshield {
-        // As in a real partial unshield, the public-address commitment is last and has no UTXO leaf.
+        // As in a real partial unshield, the public-address commitment is last and has no UTXO
+        // leaf.
         out_commitments.push(
             kohaku_crypto::poseidon_hash(&[U256::from(42), asset.hash(), U256::from(40)]).unwrap(),
         );

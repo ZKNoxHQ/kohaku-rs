@@ -11,7 +11,6 @@ use std::{
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
 use ark_ff::PrimeField;
 use ark_groth16::{Groth16, PreparedVerifyingKey, VerifyingKey, prepare_verifying_key};
-use kohaku_kv_store::{Store, file::FileStore};
 use ruint::aliases::U256;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,6 +34,7 @@ use crate::{
     },
     merkle_tree::{MerkleTree, TxidLeafHash, TxidMerkleTree, UtxoTreeIndex},
     railgun_database::RailgunDB,
+    state::{RailgunSnapshot, RailgunState},
 };
 
 const LIST: &str = "public-fixture-list";
@@ -583,13 +583,31 @@ async fn lost_submit_response_is_not_followed_by_another_post() {
 fn scratch_store() -> PathBuf {
     // Retain scratch files; public synthetic data only.
     std::env::temp_dir().join(format!(
-        "kohaku-poi-conformance-{}-{}.redb",
+        "kohaku-poi-conformance-{}-{}.json",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ))
+}
+
+fn load_snapshot(path: &std::path::Path) -> RailgunState {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            RailgunState::from_snapshot(serde_json::from_slice::<RailgunSnapshot>(&bytes).unwrap())
+                .unwrap()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => RailgunState::default(),
+        Err(error) => panic!("Cannot read snapshot: {error}"),
+    }
+}
+
+fn save_snapshot(path: &std::path::Path, state: &RailgunState) {
+    let bytes = serde_json::to_vec(&state.snapshot().unwrap()).unwrap();
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, bytes).unwrap();
+    std::fs::rename(temporary, path).unwrap();
 }
 
 fn operation(block: u64, output: u32) -> Operation {
@@ -632,7 +650,7 @@ impl TxidSyncer for FixtureSyncer {
     }
 }
 
-async fn indexer(store: Store, entered: Option<Arc<Notify>>) -> TxidIndexer {
+async fn indexer(store: RailgunState, entered: Option<Arc<Notify>>) -> TxidIndexer {
     TxidIndexer::new(
         store,
         Arc::new(FixtureSyncer {
@@ -649,7 +667,7 @@ async fn root_outage_then_reopen_preserves_checkpoint_and_replays_without_duplic
     let service = Service::new().await;
     let path = scratch_store();
     {
-        let store = Store::new(FileStore::open(&path).unwrap());
+        let store = load_snapshot(&path);
         let mut indexer = indexer(store.clone(), None).await;
         timeout(
             Duration::from_secs(5),
@@ -673,9 +691,10 @@ async fn root_outage_then_reopen_preserves_checkpoint_and_replays_without_duplic
         ));
         assert_eq!(store.get(b"txid_indexer").await.unwrap(), before);
         assert_eq!(store.get(b"txid_tree:0").await.unwrap(), tree_before);
+        save_snapshot(&path, &store);
     }
     {
-        let store = Store::new(FileStore::open(&path).unwrap());
+        let store = load_snapshot(&path);
         assert_eq!(store.get_txid_indexer().await.unwrap().synced_block, 10);
         let mut restored = indexer(store.clone(), None).await;
         assert_eq!(restored.tree(0).unwrap().leaves_len(), 1);
@@ -714,7 +733,7 @@ async fn cancellation_during_acquisition_preserves_the_saved_checkpoint() {
     let service = Service::new().await;
     let path = scratch_store();
     {
-        let store = Store::new(FileStore::open(&path).unwrap());
+        let store = load_snapshot(&path);
         let mut initial = indexer(store.clone(), None).await;
         timeout(
             Duration::from_secs(5),
@@ -736,9 +755,10 @@ async fn cancellation_during_acquisition_preserves_the_saved_checkpoint() {
             }
         }
         assert_eq!(store.get_txid_indexer().await.unwrap().synced_block, 10);
+        save_snapshot(&path, &store);
     }
     {
-        let store = Store::new(FileStore::open(&path).unwrap());
+        let store = load_snapshot(&path);
         let mut restored = indexer(store.clone(), None).await;
         assert_eq!(restored.tree(0).unwrap().leaves_len(), 1);
         service.state.lock().unwrap().latest_index = 1;

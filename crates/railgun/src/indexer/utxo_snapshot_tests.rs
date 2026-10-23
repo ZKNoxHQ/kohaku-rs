@@ -4,10 +4,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use kohaku_kv_store::{
-    backend::{KvStoreBackend, StoreError},
-    memory::MemoryStore,
-};
 use ruint::aliases::U256;
 use tokio::sync::Notify;
 
@@ -18,6 +14,10 @@ use crate::{
     crypto::keys::{ByteKey, SpendingKey, ViewingKey},
     merkle_tree::MerkleRoot,
     note::encrypt::encrypt_shield,
+    state::test_support::{
+        backend::{StateBackend, StateWriteError},
+        memory::MemoryState,
+    },
 };
 
 struct ShieldSyncer(syncer::Shield);
@@ -66,7 +66,7 @@ impl MerkleTreeVerifier for Gate {
 }
 
 async fn fixture(
-    db: Store,
+    db: RailgunState,
     gate: Arc<Gate>,
 ) -> (UtxoIndexer, Arc<dyn RailgunSigner>, Arc<ShieldSyncer>) {
     let signer = PrivateKeySigner::new_evm(
@@ -99,7 +99,7 @@ fn assert_unpublished(indexer: &UtxoIndexer, signer: &dyn RailgunSigner) {
     assert!(indexer.unspent(signer.address()).is_empty());
 }
 
-async fn assert_saved_once(db: &Store, signer: &dyn RailgunSigner) {
+async fn assert_saved_once(db: &RailgunState, signer: &dyn RailgunSigner) {
     assert_eq!(db.get_utxo_indexer().await.unwrap().synced_block, 10);
     assert_eq!(
         UtxoMerkleTree::from_state(db.get_utxo_tree(0).await.unwrap().unwrap()).leaves_len(),
@@ -113,7 +113,7 @@ async fn assert_saved_once(db: &Store, signer: &dyn RailgunSigner) {
 
 #[tokio::test]
 async fn rejected_root_then_retry_never_exposes_or_duplicates_notes() {
-    let db = Store::create();
+    let db = RailgunState::default();
     let gate = Arc::new(Gate::new());
     let (mut indexer, signer, syncer) = fixture(db.clone(), gate.clone()).await;
     gate.accepted.store(false, Ordering::Relaxed);
@@ -137,7 +137,7 @@ async fn rejected_root_then_retry_never_exposes_or_duplicates_notes() {
 
 #[tokio::test]
 async fn cancellation_during_root_validation_keeps_the_published_snapshot() {
-    let db = Store::create();
+    let db = RailgunState::default();
     let gate = Arc::new(Gate::new());
     let (mut indexer, signer, _) = fixture(db.clone(), gate.clone()).await;
     gate.paused.store(true, Ordering::Relaxed);
@@ -154,26 +154,28 @@ async fn cancellation_during_root_validation_keeps_the_published_snapshot() {
 }
 
 struct Writes {
-    inner: Arc<MemoryStore>,
+    inner: Arc<MemoryState>,
     failed_key: Option<Vec<u8>>,
     paused: Arc<AtomicBool>,
     entered: Arc<Notify>,
     after_commit: bool,
 }
 #[async_trait::async_trait]
-impl KvStoreBackend for Writes {
-    async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+impl StateBackend for Writes {
+    async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StateWriteError> {
         self.inner.get_batch(keys).await
     }
-    async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+    async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StateWriteError> {
         if self
             .failed_key
             .as_ref()
             .is_some_and(|key| items.iter().any(|(k, _)| *k == key))
         {
-            return Err(StoreError::from(
-                Box::<dyn std::error::Error + Send + Sync>::from("injected snapshot failure"),
-            ));
+            return Err(StateWriteError::from(Box::<
+                dyn std::error::Error + Send + Sync,
+            >::from(
+                "injected snapshot failure"
+            )));
         }
         if self.after_commit {
             self.inner.put_batch(items).await?;
@@ -186,9 +188,6 @@ impl KvStoreBackend for Writes {
             self.inner.put_batch(items).await?;
         }
         Ok(())
-    }
-    async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
-        self.inner.delete_batch(keys).await
     }
 }
 
@@ -205,8 +204,8 @@ async fn any_snapshot_key_failure_keeps_trees_accounts_and_cursors_together() {
         b"utxo_indexer".to_vec(),
         format!("account:{}", signer.address()).into_bytes(),
     ] {
-        let inner = Arc::new(MemoryStore::new());
-        let db = Store::new(Writes {
+        let inner = Arc::new(MemoryState::new());
+        let db = RailgunState::new(Writes {
             inner: inner.clone(),
             failed_key: Some(key),
             paused: Arc::new(AtomicBool::new(false)),
@@ -225,7 +224,7 @@ async fn any_snapshot_key_failure_keeps_trees_accounts_and_cursors_together() {
                 .notes
                 .is_empty()
         );
-        let clean = Store::new(Writes {
+        let clean = RailgunState::new(Writes {
             inner,
             failed_key: None,
             paused: Arc::new(AtomicBool::new(false)),
@@ -244,8 +243,8 @@ async fn any_snapshot_key_failure_keeps_trees_accounts_and_cursors_together() {
 async fn cancel_save(after_commit: bool) {
     let paused = Arc::new(AtomicBool::new(true));
     let entered = Arc::new(Notify::new());
-    let db = Store::new(Writes {
-        inner: Arc::new(MemoryStore::new()),
+    let db = RailgunState::new(Writes {
+        inner: Arc::new(MemoryState::new()),
         failed_key: None,
         paused: paused.clone(),
         entered: entered.clone(),
@@ -288,7 +287,7 @@ async fn lost_save_ack_keeps_a_consistent_cold_snapshot_and_allows_replay() {
 
 #[tokio::test]
 async fn a_new_account_rescan_does_not_duplicate_an_existing_account() {
-    let db = Store::create();
+    let db = RailgunState::default();
     let (mut indexer, signer, _) = fixture(db.clone(), Arc::new(Gate::new())).await;
     indexer.sync_to(10).await.unwrap();
     let bob = PrivateKeySigner::new_evm(

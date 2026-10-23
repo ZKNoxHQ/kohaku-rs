@@ -32,12 +32,36 @@ should display `Unavailable` as unknown and must not use it to authorize proof
 resubmission. A blocked shield is not queried on its own; once the list is
 caught up it is `Missing`.
 
-A copied page becomes visible only after root validation and its batch save
-complete. Cancelling sync during either step preserves the published in-memory
-prefix. If a backend committed before its save acknowledgement was lost, a
-reopen may load that validated page; the existing instance can safely reacquire
-and replay it. This does not add stronger atomicity or crash guarantees to the
-selected storage backend.
+A copied page becomes visible only after root validation and an atomic update
+of the in-memory state. Cancelling acquisition or validation preserves the last
+committed checkpoint.
+
+## Persistence
+
+Railgun keeps state in memory. The application owns persistence, following the
+same separation used by TornadoCash. Retain a clone of `RailgunState`, pass it to
+`RailgunBuilder::with_state`, and export a snapshot after successful sync or
+other state-changing operations:
+
+```rust,no_run
+use kohaku_railgun::RailgunState;
+
+let state = RailgunState::default();
+// Pass state.clone() to RailgunBuilder::with_state before building the provider.
+// After the operation completes:
+let checkpoint = serde_json::to_vec(&state.snapshot()?)?;
+// Save checkpoint atomically using your application's storage layer.
+let restored = RailgunState::from_snapshot(serde_json::from_slice(&checkpoint)?)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Snapshots include trees, sync cursors, account notes, and POI state. Each verified
+batch updates these together, and export captures a consistent checkpoint. Save
+the entire snapshot atomically so a crash cannot leave a partial checkpoint.
+Snapshots contain unencrypted notes; protect them as wallet data. Private keys
+are excluded. Keep separate state for each chain and wallet, and re-register
+signers after restoring. Changes since the last externally saved snapshot must
+be replayed after restarting.
 
 ## Controlling POI proof submission
 

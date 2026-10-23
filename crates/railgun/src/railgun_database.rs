@@ -1,4 +1,3 @@
-use kohaku_kv_store::{Store, backend::StoreError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -9,6 +8,7 @@ use crate::{
     },
     merkle_tree::{MerkleTreeState, PoiMerkleTreeState, PoiSyncState},
     poi::{provider::PoiProviderState, types::ListKey},
+    state::{RailgunState, StateError},
 };
 
 /// Errors from Railgun typed database helpers.
@@ -17,7 +17,7 @@ pub enum DatabaseError {
     #[error("Unsupported version: {0}")]
     UnsupportedVersion(u32),
     #[error("Storage error: {0}")]
-    Storage(#[from] StoreError),
+    Storage(#[from] StateError),
     #[error("Other error: {0}")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 }
@@ -28,7 +28,7 @@ impl DatabaseError {
     }
 }
 
-/// Railgun-specific typed persistence helpers over [`Store`].
+/// Railgun-specific typed persistence helpers over [`RailgunState`].
 #[cfg_attr(native, async_trait::async_trait)]
 #[cfg_attr(wasm, async_trait::async_trait(?Send))]
 pub trait RailgunDB: crate::common::MaybeSend {
@@ -64,7 +64,7 @@ pub trait RailgunDB: crate::common::MaybeSend {
 
 #[cfg_attr(native, async_trait::async_trait)]
 #[cfg_attr(wasm, async_trait::async_trait(?Send))]
-impl RailgunDB for Store {
+impl RailgunDB for RailgunState {
     async fn get_utxo_indexer(&self) -> Result<UtxoIndexerState, DatabaseError> {
         let key = utxo_indexer_key();
         let Some(bytes) = self.get(&key).await? else {
@@ -165,7 +165,7 @@ impl RailgunDB for Store {
 }
 
 async fn write_envelope<S: Serialize>(
-    store: &Store,
+    store: &RailgunState,
     key: &[u8],
     version: u32,
     data: &S,
@@ -179,7 +179,7 @@ async fn write_envelope<S: Serialize>(
 /// leave extra leaves with no position mappings if the final checkpoint write
 /// fails. The store's atomic batch commits all existing version-1 envelopes together.
 pub(crate) async fn write_txid_snapshot(
-    store: &Store,
+    store: &RailgunState,
     state: &TxidIndexerState,
     trees: &[(u32, MerkleTreeState)],
 ) -> Result<(), DatabaseError> {
@@ -193,9 +193,9 @@ pub(crate) async fn write_txid_snapshot(
 }
 
 /// One verified UTXO snapshot, including account notes and every cursor. The existing
-/// version-1 keys/envelopes are unchanged; `Store::put_batch` requires atomicity.
+/// version-1 keys/envelopes are unchanged; `RailgunState::put_batch` requires atomicity.
 pub(crate) async fn write_utxo_snapshot(
-    store: &Store,
+    store: &RailgunState,
     state: &UtxoIndexerState,
     trees: &[(u32, MerkleTreeState)],
     accounts: &[(RailgunAddress, IndexedAccountState)],
@@ -215,7 +215,7 @@ pub(crate) async fn write_utxo_snapshot(
 /// One copied POI page. Trees and the cursor commit together, matching
 /// [`write_txid_snapshot`]: a crash cannot leave new leaves behind an old cursor.
 pub(crate) async fn write_poi_snapshot(
-    store: &Store,
+    store: &RailgunState,
     list_key: &ListKey,
     next_index: u64,
     trees: &[(u32, PoiMerkleTreeState)],

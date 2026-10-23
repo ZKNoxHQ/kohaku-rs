@@ -4,7 +4,6 @@ use std::{
 };
 
 use alloy::primitives::ChainId;
-use kohaku_kv_store::Store;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,12 +32,13 @@ use crate::{
         types::{BlindedCommitment, BlindedCommitmentType, ListKey, PoiStatus, TransactProofData},
     },
     railgun_database::{DatabaseError, RailgunDB},
+    state::RailgunState,
     transact::proved_transaction::ProvedOperation,
 };
 
 pub struct PoiProvider {
     inner: PoiProviderState,
-    db: Store,
+    db: RailgunState,
     poi_client: PoiClient,
     txid_indexer: TxidIndexer,
     lists: PoiLists,
@@ -140,7 +140,7 @@ enum PendingPoiError {
 impl PoiProvider {
     pub async fn new(
         chain_id: ChainId,
-        db: Store,
+        db: RailgunState,
         txid_syncer: Arc<dyn TxidSyncer>,
         poi_endpoint: impl Into<String>,
         list_keys: Vec<ListKey>,
@@ -858,20 +858,22 @@ mod prune_tests {
 
 #[cfg(all(test, native))]
 mod submission_control_tests {
+    use std::sync::Mutex;
+
+    use alloy::primitives::address;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+        time::{Duration, timeout},
+    };
+
     use super::*;
     use crate::{
         account::signer::{PrivateKeySigner, RailgunSigner},
         caip::AssetId,
         crypto::keys::{ByteKey, SpendingKey, ViewingKey},
         indexer::syncer::{SyncEvent, SyncerError, UtxoSyncer},
-    };
-    use alloy::primitives::address;
-    use std::sync::Mutex;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-        sync::oneshot,
-        time::{Duration, timeout},
     };
 
     const FIXTURE_CHAIN_ID: u64 = 11_155_111;
@@ -1033,7 +1035,7 @@ mod submission_control_tests {
     #[tokio::test]
     async fn read_api_reports_per_list_status_and_pending_work() {
         let (url, methods, stop, task) = service().await;
-        let db = Store::create();
+        let db = RailgunState::default();
         let (operation, entry) = pending_fixture();
         let lists: Vec<ListKey> = vec!["list-a".into(), "list-b".into()];
         let mut provider = PoiProvider::new(
@@ -1124,7 +1126,7 @@ mod submission_control_tests {
     #[tokio::test]
     async fn sync_retains_pending_work_until_explicit_processing() {
         let (url, methods, stop, task) = service().await;
-        let db = Store::create();
+        let db = RailgunState::default();
         let (operation, entry) = pending_fixture();
         let txid = entry.txid;
         let mut provider = PoiProvider::new(

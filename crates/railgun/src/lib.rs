@@ -15,6 +15,8 @@ pub mod note;
 pub mod poi;
 pub mod provider;
 mod railgun_database;
+pub mod state;
+pub use state::{RailgunSnapshot, RailgunState};
 pub mod transact;
 
 #[cfg(all(test, native))]

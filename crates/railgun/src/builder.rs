@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use kohaku_eip_1193::provider::{Eip1193Provider, IntoEip1193Provider};
-use kohaku_kv_store::Store;
 
 use crate::{
     chain_config::ChainConfig,
@@ -13,13 +12,14 @@ use crate::{
     merkle_tree::SmartWalletUtxoVerifier,
     poi::provider::PoiProvider,
     provider::{RailgunProvider, RailgunProviderError},
+    state::RailgunState,
 };
 
 /// Builder for constructing a `RailgunProvider`.
 pub struct RailgunBuilder {
     chain: ChainConfig,
     provider: Arc<dyn Eip1193Provider>,
-    db: Option<Store>,
+    db: Option<RailgunState>,
     utxo_syncer: Option<Arc<dyn UtxoSyncer>>,
     poi: bool,
 }
@@ -36,14 +36,14 @@ impl RailgunBuilder {
         }
     }
 
-    /// Sets a custom database for the provider. If not set, an in-memory database
-    /// will be used.
+    /// Sets the shared in-memory state, optionally restored from a snapshot.
+    /// Keep a clone to export snapshots after sync and other state-changing operations.
     ///
-    /// Providers will use the database for storing synced UTXO data, POI proofs, and other internal
-    /// state. Sensitive data such as a user's unencrypted notes will be stored. Private key
-    /// material will never be stored in the database.
+    /// Snapshots contain synced UTXO data, POI proofs, and unencrypted notes.
+    /// The application owns persistence and protection of those snapshots.
+    /// Private key material is never included. Use one state per chain.
     #[must_use]
-    pub fn with_database(mut self, db: Store) -> Self {
+    pub fn with_state(mut self, db: RailgunState) -> Self {
         self.db = Some(db);
         self
     }
@@ -71,7 +71,7 @@ impl RailgunBuilder {
     /// Builds the `RailgunProvider` with the specified configuration.
     #[must_use]
     pub async fn build(self) -> Result<RailgunProvider, RailgunProviderError> {
-        let db = self.db.unwrap_or_else(Store::create);
+        let db = self.db.unwrap_or_default();
 
         let utxo_syncer = self.utxo_syncer.unwrap_or_else(|| {
             Arc::new(

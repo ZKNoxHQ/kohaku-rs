@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use kohaku_kv_store::Store;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,6 +11,7 @@ use crate::{
     merkle_tree::{TOTAL_LEAVES, TxidLeafHash, TxidMerkleTree, UtxoTreeIndex},
     poi::client::{PoiClientError, PoiNodeClient},
     railgun_database::{DatabaseError, RailgunDB, write_txid_snapshot},
+    state::RailgunState,
 };
 
 pub struct TxidIndexer {
@@ -21,7 +21,7 @@ pub struct TxidIndexer {
     /// kept in full in `inner.own_ops`, the others are reduced to a txid leaf as before.
     watched: std::collections::HashSet<U256>,
 
-    db: Store,
+    db: RailgunState,
     txid_syncer: Arc<dyn TxidSyncer>,
 }
 
@@ -51,7 +51,7 @@ pub enum TxidIndexerError {
 
 impl TxidIndexer {
     pub async fn new(
-        db: Store,
+        db: RailgunState,
         txid_syncer: Arc<dyn TxidSyncer>,
     ) -> Result<Self, TxidIndexerError> {
         let inner = db.get_txid_indexer().await?;
@@ -255,7 +255,7 @@ impl TxidIndexer {
     }
 
     /// Persist trees, mappings, pending operations and checkpoint as one atomic snapshot.
-    /// Custom backends must honor `Store::put_batch`'s all-or-nothing contract.
+    /// The in-memory state publishes all snapshot entries under one write lock.
     async fn save(&self) -> Result<(), DatabaseError> {
         let state = TxidIndexerState {
             synced_block: self.inner.synced_block,
@@ -278,40 +278,41 @@ impl TxidIndexer {
 
 #[cfg(all(test, native))]
 mod snapshot_tests {
-    use super::*;
-    use crate::{
-        merkle_tree::MerkleRoot,
-        poi::types::{ListKey, TransactProofData, ValidatedRailgunTxidStatus},
-    };
-    use kohaku_kv_store::{
-        backend::{KvStoreBackend, StoreError},
-        memory::MemoryStore,
-    };
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    use super::*;
+    use crate::{
+        merkle_tree::MerkleRoot,
+        poi::types::{ListKey, TransactProofData, ValidatedRailgunTxidStatus},
+        state::test_support::{
+            backend::{StateBackend, StateWriteError},
+            memory::MemoryState,
+        },
+    };
+
     #[derive(Clone)]
     struct FailCheckpoint {
-        inner: Arc<MemoryStore>,
+        inner: Arc<MemoryState>,
         fail: Arc<AtomicBool>,
         after_commit: Arc<AtomicBool>,
         committed: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
     }
     #[async_trait::async_trait]
-    impl KvStoreBackend for FailCheckpoint {
-        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    impl StateBackend for FailCheckpoint {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StateWriteError> {
             self.inner.get_batch(keys).await
         }
-        async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+        async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StateWriteError> {
             if self.fail.load(Ordering::SeqCst)
                 && items.iter().any(|(key, _)| *key == b"txid_indexer")
             {
                 if self.after_commit.load(Ordering::SeqCst) {
                     self.inner.put_batch(items).await?;
                 }
-                return Err(StoreError::from(Box::new(std::io::Error::other(
+                return Err(StateWriteError::from(Box::new(std::io::Error::other(
                     "injected checkpoint write failure",
                 ))
                     as Box<dyn std::error::Error + Send + Sync>));
@@ -325,9 +326,6 @@ mod snapshot_tests {
                 std::future::pending::<()>().await;
             }
             Ok(())
-        }
-        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
-            self.inner.delete_batch(keys).await
         }
     }
 
@@ -419,12 +417,12 @@ mod snapshot_tests {
     #[tokio::test]
     async fn a_failed_checkpoint_write_cannot_split_trees_from_position_maps() {
         let backend = FailCheckpoint {
-            inner: Arc::new(MemoryStore::new()),
+            inner: Arc::new(MemoryState::new()),
             fail: Arc::new(AtomicBool::new(false)),
             after_commit: Arc::new(AtomicBool::new(false)),
             committed: Arc::new(Mutex::new(None)),
         };
-        let store = Store::new(backend.clone());
+        let store = RailgunState::new(backend.clone());
         let node = Node::new(0);
         let mut first = TxidIndexer::new(store.clone(), Arc::new(TwoOperations))
             .await
@@ -464,12 +462,12 @@ mod snapshot_tests {
     #[tokio::test]
     async fn a_lost_save_reply_restores_the_complete_committed_snapshot() {
         let backend = FailCheckpoint {
-            inner: Arc::new(MemoryStore::new()),
+            inner: Arc::new(MemoryState::new()),
             fail: Arc::new(AtomicBool::new(true)),
             after_commit: Arc::new(AtomicBool::new(true)),
             committed: Arc::new(Mutex::new(None)),
         };
-        let store = Store::new(backend.clone());
+        let store = RailgunState::new(backend.clone());
         let node = Node::new(1);
         let mut writer = TxidIndexer::new(store.clone(), Arc::new(TwoOperations))
             .await
@@ -495,12 +493,12 @@ mod snapshot_tests {
     async fn cancellation_after_the_atomic_commit_preserves_every_mapping() {
         let committed = Arc::new(tokio::sync::Notify::new());
         let backend = FailCheckpoint {
-            inner: Arc::new(MemoryStore::new()),
+            inner: Arc::new(MemoryState::new()),
             fail: Arc::new(AtomicBool::new(false)),
             after_commit: Arc::new(AtomicBool::new(false)),
             committed: Arc::new(Mutex::new(Some(committed.clone()))),
         };
-        let store = Store::new(backend.clone());
+        let store = RailgunState::new(backend.clone());
         let node = Node::new(1);
         let mut writer = TxidIndexer::new(store.clone(), Arc::new(TwoOperations))
             .await
@@ -531,7 +529,7 @@ mod snapshot_tests {
 
     #[tokio::test]
     async fn retry_on_the_same_instance_cannot_skip_failed_root_validation() {
-        let store = Store::create();
+        let store = RailgunState::default();
         let node = Node::new(1);
         let mut indexer = TxidIndexer::new(store.clone(), Arc::new(TwoOperations))
             .await
@@ -560,7 +558,7 @@ mod snapshot_tests {
 
     #[tokio::test]
     async fn an_older_target_cannot_regress_the_checkpoint() {
-        let store = Store::create();
+        let store = RailgunState::default();
         let node = Node::new(1);
         let mut indexer = TxidIndexer::new(store.clone(), Arc::new(TwoOperations))
             .await
@@ -575,7 +573,7 @@ mod snapshot_tests {
 
     #[tokio::test]
     async fn an_older_target_still_processes_previously_fetched_pending_operations() {
-        let store = Store::create();
+        let store = RailgunState::default();
         let node = Node::new(0);
         let mut indexer = TxidIndexer::new(store.clone(), Arc::new(TwoOperations))
             .await

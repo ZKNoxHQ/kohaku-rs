@@ -1,6 +1,5 @@
 use std::{collections::HashMap, future::Future};
 
-use kohaku_kv_store::Store;
 use ruint::aliases::U256;
 use thiserror::Error;
 use tracing::{info, warn};
@@ -13,6 +12,7 @@ use crate::{
         types::{BlindedCommitment, ListKey},
     },
     railgun_database::{DatabaseError, RailgunDB, write_poi_snapshot},
+    state::RailgunState,
 };
 
 /// One request, matching the node's cap on `ppoi_poi_merkletree_leaves`.
@@ -28,7 +28,7 @@ const MAX_RETRIES: usize = 3;
 
 /// Every configured POI list, stored locally and queried by leaf index.
 pub struct PoiLists {
-    db: Store,
+    db: RailgunState,
     lists: HashMap<ListKey, PoiList>,
 }
 
@@ -61,7 +61,7 @@ pub enum PoiSyncError {
 }
 
 impl PoiLists {
-    pub async fn load(db: Store, list_keys: &[ListKey]) -> Result<Self, DatabaseError> {
+    pub async fn load(db: RailgunState, list_keys: &[ListKey]) -> Result<Self, DatabaseError> {
         let mut lists = HashMap::new();
         for list_key in list_keys {
             lists.insert(list_key.clone(), PoiList::load(&db, list_key).await?);
@@ -284,7 +284,7 @@ impl PoiList {
         }
     }
 
-    async fn load(db: &Store, list_key: &ListKey) -> Result<Self, DatabaseError> {
+    async fn load(db: &RailgunState, list_key: &ListKey) -> Result<Self, DatabaseError> {
         let next_index = db.get_poi_sync(list_key).await?.next_index;
         let mut trees = HashMap::new();
         let mut index = HashMap::new();
@@ -377,13 +377,15 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
-    use kohaku_kv_store::{
-        backend::{KvStoreBackend, StoreError},
-        memory::MemoryStore,
-    };
-
     use super::*;
-    use crate::{merkle_tree::MerkleRoot, poi::types::TransactProofData};
+    use crate::{
+        merkle_tree::MerkleRoot,
+        poi::types::TransactProofData,
+        state::test_support::{
+            backend::{StateBackend, StateWriteError},
+            memory::MemoryState,
+        },
+    };
 
     #[derive(Clone, Copy)]
     enum LeafPages {
@@ -553,7 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_stops_at_the_zero_leaf_and_resumes() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let mut leaves: Vec<U256> = (1..=101u32).map(U256::from).collect();
         let node = FakeNode::new(leaves.clone(), true);
@@ -581,7 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_root_does_not_advance_the_cursor() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let node = FakeNode::new((1..=3u32).map(U256::from).collect(), false);
         let mut lists = PoiLists::load(db.clone(), &[key.clone()]).await.unwrap();
@@ -603,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rejected_later_page_keeps_the_prefix_but_not_caught_up() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let node = FakeNode::new((1..=101u32).map(U256::from).collect(), true);
         node.reject_after(1);
@@ -619,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_page_is_not_the_end_of_the_list() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let node = FakeNode::empty();
         let mut lists = PoiLists::load(db, &[key.clone()]).await.unwrap();
@@ -632,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_short_page_without_a_zero_is_not_applied() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let node = FakeNode::exact((1..=3u32).map(U256::from).collect());
         let mut lists = PoiLists::load(db, &[key.clone()]).await.unwrap();
@@ -650,20 +652,17 @@ mod tests {
 
     /// Counts snapshot saves.
     struct CountWrites {
-        inner: MemoryStore,
+        inner: MemoryState,
         writes: std::sync::Arc<AtomicUsize>,
     }
     #[async_trait::async_trait]
-    impl KvStoreBackend for CountWrites {
-        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    impl StateBackend for CountWrites {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StateWriteError> {
             self.inner.get_batch(keys).await
         }
-        async fn put_batch(&self, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+        async fn put_batch(&self, entries: &[(&[u8], &[u8])]) -> Result<(), StateWriteError> {
             self.writes.fetch_add(1, Ordering::Relaxed);
             self.inner.put_batch(entries).await
-        }
-        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
-            self.inner.delete_batch(keys).await
         }
     }
 
@@ -672,8 +671,8 @@ mod tests {
     #[tokio::test]
     async fn a_long_list_is_copied_in_batches() {
         let writes = std::sync::Arc::new(AtomicUsize::new(0));
-        let db = Store::new(CountWrites {
-            inner: MemoryStore::new(),
+        let db = RailgunState::new(CountWrites {
+            inner: MemoryState::new(),
             writes: writes.clone(),
         });
         let key = list_key();
@@ -709,7 +708,7 @@ mod tests {
     /// then retried page by page, which keeps everything up to 1,300.
     #[tokio::test]
     async fn a_rejected_batch_keeps_the_accepted_pages() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let node = FakeNode::new(leaves(2_500), true);
         node.publish_through(1_300);
@@ -736,7 +735,7 @@ mod tests {
     /// before the batch.
     #[tokio::test]
     async fn a_rollback_forgets_a_commitment_repeated_in_the_batch() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let mut all = leaves(400);
         let repeated = U256::from(9_999u32);
@@ -753,28 +752,25 @@ mod tests {
     }
 
     struct FailWrites {
-        inner: MemoryStore,
+        inner: MemoryState,
     }
     #[async_trait::async_trait]
-    impl KvStoreBackend for FailWrites {
-        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    impl StateBackend for FailWrites {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StateWriteError> {
             self.inner.get_batch(keys).await
         }
-        async fn put_batch(&self, _: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
-            Err(StoreError::from(
-                Box::new(std::io::Error::other("injected POI snapshot failure"))
-                    as Box<dyn std::error::Error + Send + Sync>,
+        async fn put_batch(&self, _: &[(&[u8], &[u8])]) -> Result<(), StateWriteError> {
+            Err(StateWriteError::from(Box::new(std::io::Error::other(
+                "injected POI snapshot failure",
             ))
-        }
-        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
-            self.inner.delete_batch(keys).await
+                as Box<dyn std::error::Error + Send + Sync>))
         }
     }
 
     #[tokio::test]
     async fn a_failed_save_rolls_the_page_back() {
-        let db = Store::new(FailWrites {
-            inner: MemoryStore::new(),
+        let db = RailgunState::new(FailWrites {
+            inner: MemoryState::new(),
         });
         let kept = db.clone();
         let key = list_key();
@@ -793,7 +789,7 @@ mod tests {
     }
     #[tokio::test]
     async fn cancelled_root_validation_does_not_publish_unvalidated_leaves() {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let old = BlindedCommitment::from(U256::from(1));
         let new = BlindedCommitment::from(U256::from(2));
@@ -834,7 +830,7 @@ mod tests {
         assert!(proof.verify());
     }
     struct PausingWrites {
-        inner: std::sync::Arc<MemoryStore>,
+        inner: std::sync::Arc<MemoryState>,
         paused: std::sync::Arc<AtomicBool>,
         entered: std::sync::Arc<tokio::sync::Notify>,
         after_commit: bool,
@@ -843,11 +839,11 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl KvStoreBackend for PausingWrites {
-        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    impl StateBackend for PausingWrites {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StateWriteError> {
             self.inner.get_batch(keys).await
         }
-        async fn put_batch(&self, values: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+        async fn put_batch(&self, values: &[(&[u8], &[u8])]) -> Result<(), StateWriteError> {
             if self.after_commit {
                 self.inner.put_batch(values).await?;
             }
@@ -861,16 +857,13 @@ mod tests {
             }
             Ok(())
         }
-        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
-            self.inner.delete_batch(keys).await
-        }
     }
 
     async fn cancel_save(after_commit: bool, batched: bool) {
         let paused = std::sync::Arc::new(AtomicBool::new(false));
         let entered = std::sync::Arc::new(tokio::sync::Notify::new());
-        let db = Store::new(PausingWrites {
-            inner: std::sync::Arc::new(MemoryStore::new()),
+        let db = RailgunState::new(PausingWrites {
+            inner: std::sync::Arc::new(MemoryState::new()),
             paused: paused.clone(),
             entered: entered.clone(),
             after_commit,
@@ -945,7 +938,7 @@ mod tests {
     // The first page commits, then a later batch is abandoned after it has staged leaves.
     // Fetching adds an await between page insertions that the pre-batching PR did not have.
     async fn cancel_later_batch(during_fetch: bool) {
-        let db = Store::create();
+        let db = RailgunState::default();
         let key = list_key();
         let node = FakeNode::new(leaves(450), true);
         if during_fetch {

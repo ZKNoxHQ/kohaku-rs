@@ -3,7 +3,6 @@ use std::{
     sync::Arc,
 };
 
-use kohaku_kv_store::Store;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
@@ -17,6 +16,7 @@ use crate::{
     merkle_tree::{MerkleTreeVerifier, UtxoLeafHash, UtxoMerkleTree},
     note::utxo::{NoteError, UtxoNote},
     railgun_database::{DatabaseError, RailgunDB, write_utxo_snapshot},
+    state::RailgunState,
 };
 
 /// Utxo indexer that maintains the set of UTXO merkle trees and tracks accounts
@@ -26,7 +26,7 @@ pub struct UtxoIndexer {
     pub utxo_trees: BTreeMap<u32, UtxoMerkleTree>,
     accounts: Vec<IndexedAccount>,
 
-    db: Store,
+    db: RailgunState,
     utxo_syncer: Arc<dyn UtxoSyncer>,
     utxo_verifier: Arc<dyn MerkleTreeVerifier>,
 }
@@ -53,7 +53,7 @@ pub enum UtxoIndexerError {
 
 impl UtxoIndexer {
     pub async fn new(
-        db: Store,
+        db: RailgunState,
         utxo_syncer: Arc<dyn UtxoSyncer>,
         utxo_verifier: Arc<dyn MerkleTreeVerifier>,
     ) -> Result<Self, UtxoIndexerError> {
@@ -346,17 +346,19 @@ impl UtxoIndexer {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use kohaku_kv_store::{
-        Store,
-        backend::{KvStoreBackend, StoreError},
-        memory::MemoryStore,
-    };
     use ruint::aliases::U256;
 
     use super::*;
     use crate::{
         indexer::syncer::{LegacyCommitment, SyncEvent, SyncerError, UtxoSyncer},
         merkle_tree::MerkleRoot,
+        state::{
+            RailgunState,
+            test_support::{
+                backend::{StateBackend, StateWriteError},
+                memory::MemoryState,
+            },
+        },
     };
 
     /// One commitment at block 5 of a 10-block chain.
@@ -401,45 +403,43 @@ mod tests {
     /// in the middle of a save.
     #[derive(Clone)]
     struct Faulty {
-        inner: Arc<MemoryStore>,
+        inner: Arc<MemoryState>,
         fail_on: Arc<Mutex<Option<Vec<u8>>>>,
     }
 
     impl Faulty {
         fn new() -> Self {
             Self {
-                inner: Arc::new(MemoryStore::new()),
+                inner: Arc::new(MemoryState::new()),
                 fail_on: Arc::new(Mutex::new(None)),
             }
         }
     }
 
     #[async_trait::async_trait]
-    impl KvStoreBackend for Faulty {
-        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    impl StateBackend for Faulty {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StateWriteError> {
             self.inner.get_batch(keys).await
         }
 
-        async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+        async fn put_batch(&self, items: &[(&[u8], &[u8])]) -> Result<(), StateWriteError> {
             if let Some(key) = self.fail_on.lock().unwrap().as_deref() {
                 if items.iter().any(|(k, _)| *k == key) {
-                    return Err(StoreError::from(
-                        Box::<dyn std::error::Error + Send + Sync>::from("simulated interruption"),
-                    ));
+                    return Err(StateWriteError::from(Box::<
+                        dyn std::error::Error + Send + Sync,
+                    >::from(
+                        "simulated interruption"
+                    )));
                 }
             }
             self.inner.put_batch(items).await
-        }
-
-        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
-            self.inner.delete_batch(keys).await
         }
     }
 
     #[tokio::test]
     async fn a_root_the_chain_never_had_stops_the_sync() {
         let mut indexer = UtxoIndexer::new(
-            Store::new(MemoryStore::new()),
+            RailgunState::new(MemoryState::new()),
             Arc::new(OneLeaf),
             Arc::new(Verifier(false)),
         )
@@ -464,7 +464,7 @@ mod tests {
         *backend.fail_on.lock().unwrap() = Some(b"utxo_tree:0".to_vec());
 
         let mut indexer = UtxoIndexer::new(
-            Store::new(backend.clone()),
+            RailgunState::new(backend.clone()),
             Arc::new(OneLeaf),
             Arc::new(Verifier(true)),
         )
@@ -478,7 +478,7 @@ mod tests {
         // Next run: the saved synced block must not be ahead of the saved tree.
         *backend.fail_on.lock().unwrap() = None;
         let mut reloaded = UtxoIndexer::new(
-            Store::new(backend.clone()),
+            RailgunState::new(backend.clone()),
             Arc::new(OneLeaf),
             Arc::new(Verifier(true)),
         )
