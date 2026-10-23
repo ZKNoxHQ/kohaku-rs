@@ -141,7 +141,7 @@ pub fn encrypt_shield(
     })
 }
 
-pub fn blind_viewing_keys(
+pub(crate) fn blind_viewing_keys(
     sender: ViewingPublicKey,
     receiver: ViewingPublicKey,
     shared_random: &[u8; 32],

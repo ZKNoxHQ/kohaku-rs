@@ -11,7 +11,7 @@ mod common;
 pub mod crypto;
 pub mod indexer;
 mod merkle_tree;
-mod note;
+pub mod note;
 pub mod poi;
 pub mod provider;
 mod railgun_database;

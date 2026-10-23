@@ -148,14 +148,18 @@ async fn test_transfer_poi<P: Provider>(
     account_1: Arc<dyn RailgunSigner>,
     account_2: Arc<dyn RailgunSigner>,
 ) {
-    let tx = railgun.transact().transfer(
-        account_1.clone(),
-        account_2.address(),
-        USDC,
-        1,
-        "test transfer",
-    );
-    let transfer_tx = railgun.build(tx, &mut rand::rng()).await.unwrap();
+    let spends = railgun
+        .transfer_amount(
+            account_1.clone(),
+            account_2.address(),
+            USDC,
+            1,
+            "test transfer",
+            &mut rand::rng(),
+        )
+        .await
+        .unwrap();
+    let transfer_tx = railgun.prove(&spends, &mut rand::rng()).await.unwrap();
 
     info!("Sending transfer transaction");
     let tx = provider
@@ -178,16 +182,17 @@ async fn test_unshield_poi<P: Provider>(
     account_1: Arc<dyn RailgunSigner>,
     account_2: Arc<dyn RailgunSigner>,
 ) {
-    let tx = railgun
-        .transact()
-        .unshield(
+    let spends = railgun
+        .unshield_amount(
             account_1.clone(),
             address!("0xe03747a83E600c3ab6C2e16dd1989C9b419D3a86"),
             USDC,
             2,
+            &mut rand::rng(),
         )
+        .await
         .unwrap();
-    let unshield_tx = railgun.build(tx, &mut rand::rng()).await.unwrap();
+    let unshield_tx = railgun.prove(&spends, &mut rand::rng()).await.unwrap();
 
     let usdc_contract = ERC20::new(USDC_ADDRESS, provider);
     let pre_unshield_balance_eoa = usdc_contract

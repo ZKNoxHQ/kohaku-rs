@@ -31,7 +31,7 @@ use crate::{
         types::{BlindedCommitmentType, PoiStatus},
     },
     transact::{
-        ShieldBuilder, TransactionBuilder, TransactionBuilderError,
+        AmountError, AmountIntents, ShieldBuilder, Spend, SpendError, attach_fee, prove_operations,
         proved_transaction::{ProvedOperation, ProvedTx},
     },
 };
@@ -102,6 +102,15 @@ impl NoteEntry {
     }
 }
 
+/// An unspent note plus the POI status `balance` and spends read.
+///
+/// This is the note the amount helpers select from and that [`RailgunProvider::spend`] takes.
+#[derive(Debug, Clone)]
+pub struct AnnotatedNote {
+    pub note: UtxoNote,
+    pub poi_status: Option<PoiStatus>,
+}
+
 /// What [`RailgunProvider::prepare_userop_single_proof`] did, for logs and UIs.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,20 +159,20 @@ struct SpendableNotes {
 }
 
 impl SpendableNotes {
-    fn from_unspent(poi_enabled: bool, in_notes: Vec<(UtxoNote, Option<PoiStatus>)>) -> Self {
+    fn from_unspent(poi_enabled: bool, in_notes: Vec<AnnotatedNote>) -> Self {
         let unavailable = in_notes
             .iter()
-            .filter(|(_, status)| *status == Some(PoiStatus::Unavailable))
-            .map(|(note, _)| (note.viewing_pubkey, note.asset))
+            .filter(|note| note.poi_status == Some(PoiStatus::Unavailable))
+            .map(|note| (note.note.viewing_pubkey, note.note.asset))
             .collect();
         let notes = if poi_enabled {
             in_notes
                 .into_iter()
-                .filter(|(_, status)| *status == Some(PoiStatus::Valid))
-                .map(|(note, _)| note)
+                .filter(|note| note.poi_status == Some(PoiStatus::Valid))
+                .map(|note| note.note)
                 .collect()
         } else {
-            in_notes.into_iter().map(|(note, _)| note).collect()
+            in_notes.into_iter().map(|note| note.note).collect()
         };
         Self { notes, unavailable }
     }
@@ -173,10 +182,10 @@ impl SpendableNotes {
     /// the only inputs, so a covered amount does not take this path.
     fn explain(
         &self,
-        result: Result<Vec<ProvedOperation>, TransactionBuilderError>,
-    ) -> Result<Vec<ProvedOperation>, RailgunProviderError> {
+        result: Result<Vec<Spend>, AmountError>,
+    ) -> Result<Vec<Spend>, RailgunProviderError> {
         match result {
-            Err(TransactionBuilderError::InsufficientBalance { from, asset, .. })
+            Err(AmountError::InsufficientBalance { from, asset, .. })
                 if self.unavailable.contains(&(from.viewing_pubkey(), asset)) =>
             {
                 Err(RailgunProviderError::PoiStatusUnavailable)
@@ -190,8 +199,10 @@ impl SpendableNotes {
 pub enum RailgunProviderError {
     #[error("Utxo indexer error: {0}")]
     UtxoIndexer(#[from] UtxoIndexerError),
-    #[error("Build error: {0}")]
-    Build(#[from] TransactionBuilderError),
+    #[error("Spend error: {0}")]
+    Spend(#[from] SpendError),
+    #[error("Amount error: {0}")]
+    Amount(#[from] AmountError),
     #[error("POI provider error: {0}")]
     PoiProvider(#[from] PoiProviderError),
     #[error("Unable to construct valid note configuration for fee payment")]
@@ -389,26 +400,55 @@ impl RailgunProvider {
         Ok(())
     }
 
-    /// Returns all unspent notes for the given address.
-    pub async fn notes(&mut self, address: RailgunAddress) -> Vec<NoteEntry> {
-        self.unspent(address)
-            .await
+    /// Unspent notes for `address`, each with its POI status.
+    ///
+    /// This is the list [`Self::spend`] and the amount helpers read. [`Self::balance`]
+    /// is the sum of these notes grouped by asset and POI status.
+    #[allow(clippy::unused_async)]
+    pub async fn unspent_notes(&mut self, address: RailgunAddress) -> Vec<AnnotatedNote> {
+        let notes = self.utxo_indexer.unspent(address);
+        let Some(poi_provider) = &self.poi_provider else {
+            return notes
+                .into_iter()
+                .map(|note| AnnotatedNote {
+                    note,
+                    poi_status: None,
+                })
+                .collect();
+        };
+
+        notes
             .into_iter()
-            .map(|(note, poi_status)| NoteEntry::from_note(note, poi_status))
+            .map(|note| {
+                let poi_status =
+                    poi_provider.status(note.blinded_commitment.into(), note.commitment_type);
+                AnnotatedNote {
+                    note,
+                    poi_status: Some(poi_status),
+                }
+            })
             .collect()
     }
 
-    /// Returns the balance for the given address.
+    /// Returns all unspent notes for the given address, as a display record.
+    pub async fn notes(&mut self, address: RailgunAddress) -> Vec<NoteEntry> {
+        self.unspent_notes(address)
+            .await
+            .into_iter()
+            .map(|annotated| NoteEntry::from_note(annotated.note, annotated.poi_status))
+            .collect()
+    }
+
+    /// Sum of [`Self::unspent_notes`], grouped by asset and POI status.
     ///
-    /// If POI is enabled, groups balances by observed POI status. Only `Valid`
-    /// is spendable. `Unavailable` means the local list is not caught up, not
-    /// that a proof is missing.
+    /// If POI is enabled, only `Valid` is spendable. `Unavailable` means the local
+    /// list is not caught up, not that a proof is missing.
     pub async fn balance(&mut self, address: RailgunAddress) -> Vec<BalanceEntry> {
         let mut balance_map = HashMap::new();
-        for note in self.notes(address).await {
+        for annotated in self.unspent_notes(address).await {
             *balance_map
-                .entry((note.asset, note.poi_status))
-                .or_insert(0) += note.amount;
+                .entry((annotated.note.asset(), annotated.poi_status))
+                .or_insert(0) += annotated.note.value();
         }
 
         balance_map
@@ -426,9 +466,64 @@ impl RailgunProvider {
         ShieldBuilder::new(self.chain.clone())
     }
 
-    /// Helper to create a transaction builder.
-    pub fn transact(&self) -> TransactionBuilder {
-        TransactionBuilder::new()
+    /// Start a spend of these notes. They must share a tree, an asset, and the signer's
+    /// viewing key. This does not select notes, check POI, or ask the signer to sign.
+    pub fn spend(
+        &self,
+        signer: Arc<dyn RailgunSigner>,
+        inputs: Vec<UtxoNote>,
+    ) -> Result<Spend, SpendError> {
+        Spend::try_new(signer, inputs)
+    }
+
+    /// Select notes for one transfer and return the spends that cover it.
+    ///
+    /// A transfer that does not fit on one tree comes back as several spends, one per
+    /// tree, each of which is one spending signature at [`Self::prove`].
+    pub async fn transfer_amount(
+        &mut self,
+        from: Arc<dyn RailgunSigner>,
+        to: RailgunAddress,
+        asset: AssetId,
+        value: u128,
+        memo: &str,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Spend>, RailgunProviderError> {
+        self.resolve_amounts(
+            AmountIntents::new().transfer(from, to, asset, value, memo),
+            rng,
+        )
+        .await
+    }
+
+    /// Select notes for one unshield and return the spends that cover it.
+    ///
+    /// See [`Self::transfer_amount`] for how a value that spans trees is split.
+    pub async fn unshield_amount(
+        &mut self,
+        from: Arc<dyn RailgunSigner>,
+        to: Address,
+        asset: AssetId,
+        value: u128,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Spend>, RailgunProviderError> {
+        self.resolve_amounts(AmountIntents::new().unshield(from, to, asset, value)?, rng)
+            .await
+    }
+
+    /// Resolve several amount intents in one selection.
+    ///
+    /// Intents for the same signer and asset are fitted together, smallest first, onto
+    /// the oldest tree that can hold each one. The result is the note-level spends
+    /// [`Self::prove`] accepts.
+    pub async fn resolve_amounts(
+        &mut self,
+        intents: AmountIntents,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Spend>, RailgunProviderError> {
+        let spendable = self.spendable_notes().await;
+        let resolved = intents.resolve(&spendable.notes, rng);
+        spendable.explain(resolved)
     }
 
     /// Forgets the pending POI proofs of operations that never reached the chain, for instance
@@ -449,39 +544,31 @@ impl RailgunProvider {
     ///
     /// Call `eth_estimateGas` on the result with `from` set to [`VERIFICATION_BYPASS`]: the
     /// Railgun verifier skips the SNARK check for that origin. Nothing is registered with the
-    /// POI provider and no proof is generated, so this is cheap enough to run before every quote.
+    /// POI provider, no proof is generated, and the spending signer is not asked to sign.
     /// Not usable on the ERC-4337 path, where the bundler simulates with its own origin.
-    pub async fn build_dummy(
+    pub async fn prove_dummy(
         &mut self,
-        builder: TransactionBuilder,
+        spends: &[Spend],
         rng: &mut impl CryptoRng,
     ) -> Result<ProvedTx, RailgunProviderError> {
-        let spendable = self.spendable_notes().await;
-        let built = builder
-            .build_dummy(
-                self.chain.id,
-                &spendable.notes,
-                &self.utxo_indexer.utxo_trees,
-                rng,
-            )
-            .await;
-        let operations = spendable.explain(built)?;
+        let operations = self.prove_spends(spends, rng, false).await?;
         Ok(ProvedTx::new(self.chain.railgun_smart_wallet, operations))
     }
 
-    /// Build a transaction builder into a proved, signable transaction.
-    pub async fn build(
+    /// Prove spends into one Railgun transaction.
+    ///
+    /// Each spend is one spending signature. POI, when enabled, is checked per input
+    /// note before any signature is requested. Valid spends are registered for POI.
+    pub async fn prove(
         &mut self,
-        builder: TransactionBuilder,
+        spends: &[Spend],
         rng: &mut impl CryptoRng,
     ) -> Result<ProvedTx, RailgunProviderError> {
-        let operations = self.build_operation(builder, rng).await?;
+        let operations = self.prove_spends(spends, rng, true).await?;
         if let Some(poi_provider) = &mut self.poi_provider {
             poi_provider.register_ops(&operations).await?;
         }
-
-        let proved_tx = ProvedTx::new(self.chain.railgun_smart_wallet, operations);
-        Ok(proved_tx)
+        Ok(ProvedTx::new(self.chain.railgun_smart_wallet, operations))
     }
 
     /// The UserOperation [`Self::prepare_userop`] would build, with a dummy proof: same
@@ -492,7 +579,7 @@ impl RailgunProvider {
     /// the gas limits, hence the fee, are known before the one real proof.
     pub async fn dummy_userop<S: SmartAccount>(
         &mut self,
-        builder: TransactionBuilder,
+        spends: &[Spend],
         sender: &S,
         fee_payer: Arc<dyn RailgunSigner>,
         fee_token: Address,
@@ -502,26 +589,19 @@ impl RailgunProvider {
         rng: &mut impl CryptoRng,
     ) -> Result<SignableUserOperation, RailgunProviderError> {
         let (privacy_paymaster, railgun_fee_adapter) = self.paymaster_contracts(fee_token)?;
-        let fee_asset = AssetId::Erc20(fee_token);
-        let adapted = builder
-            .adapt(railgun_fee_adapter, *sender.address().into_word())
-            .transfer(
+        let with_fee = self
+            .spends_with_fee(
+                spends,
                 fee_payer,
-                paymaster_railgun_address(ChainId::evm(self.chain.id)),
-                fee_asset,
+                fee_token,
                 fee,
-                "fee",
-            );
-        let spendable = self.spendable_notes().await;
-        let built = adapted
-            .build_dummy(
-                self.chain.id,
-                &spendable.notes,
-                &self.utxo_indexer.utxo_trees,
+                railgun_fee_adapter,
+                *sender.address().into_word(),
                 rng,
             )
-            .await;
-        let operations = spendable.explain(built)?;
+            .await?;
+        // Unsigned circuit inputs: a gas estimate must not ask the spending signer.
+        let operations = self.prove_spends(&with_fee, rng, false).await?;
         self.userop_from(
             &operations,
             sender,
@@ -549,7 +629,7 @@ impl RailgunProvider {
     /// anything is sent: that costs a second signature, never funds.
     pub async fn prepare_userop_single_proof<S: SmartAccount>(
         &mut self,
-        builder: TransactionBuilder,
+        spends: &[Spend],
         bundler: &dyn Bundler,
         sender: &S,
         fee_payer: Arc<dyn RailgunSigner>,
@@ -559,7 +639,6 @@ impl RailgunProvider {
         rng: &mut impl CryptoRng,
     ) -> Result<(SignableUserOperation, SingleProofReport), RailgunProviderError> {
         let (privacy_paymaster, railgun_fee_adapter) = self.paymaster_contracts(fee_token)?;
-        let fee_asset = AssetId::Erc20(fee_token);
         let total_gas = gas.pre_verification_gas
             + gas.verification_gas_limit
             + gas.call_gas_limit
@@ -568,16 +647,18 @@ impl RailgunProvider {
         let fee = total_gas * gas.max_fee_per_gas;
 
         // The one proof. This is the only place the spending signer is used.
-        let adapted = builder
-            .adapt(railgun_fee_adapter, *sender.address().into_word())
-            .transfer(
+        let with_fee = self
+            .spends_with_fee(
+                spends,
                 fee_payer,
-                paymaster_railgun_address(ChainId::evm(self.chain.id)),
-                fee_asset,
+                fee_token,
                 fee,
-                "fee",
-            );
-        let operations = self.build_operation(adapted, rng).await?;
+                railgun_fee_adapter,
+                *sender.address().into_word(),
+                rng,
+            )
+            .await?;
+        let operations = self.prove_spends(&with_fee, rng, true).await?;
         let signable = self
             .userop_from(
                 &operations,
@@ -658,7 +739,7 @@ impl RailgunProvider {
     #[allow(clippy::too_many_arguments)]
     pub async fn simulate_gas_limits<S: SmartAccount>(
         &mut self,
-        builder: &TransactionBuilder,
+        spends: &[Spend],
         bundler: &dyn Bundler,
         sender: &S,
         fee_payer: Arc<dyn RailgunSigner>,
@@ -701,7 +782,7 @@ impl RailgunProvider {
             let fee = total_of(&gas) * price.max_fee_per_gas;
             let dummy = self
                 .dummy_userop(
-                    builder.clone(),
+                    spends,
                     sender,
                     fee_payer.clone(),
                     fee_token,
@@ -814,7 +895,7 @@ impl RailgunProvider {
     #[allow(clippy::too_many_arguments)]
     pub async fn prepare_userop_single<S: SmartAccount>(
         &mut self,
-        builder: TransactionBuilder,
+        spends: &[Spend],
         bundler: &dyn Bundler,
         sender: &S,
         fee_payer: Arc<dyn RailgunSigner>,
@@ -826,7 +907,7 @@ impl RailgunProvider {
     ) -> Result<SignableUserOperation, RailgunProviderError> {
         let (gas, details) = self
             .simulate_gas_limits(
-                &builder,
+                spends,
                 bundler,
                 sender,
                 fee_payer.clone(),
@@ -850,7 +931,7 @@ impl RailgunProvider {
         );
         let (signable, _report) = self
             .prepare_userop_single_proof(
-                builder, bundler, sender, fee_payer, fee_token, calldata, gas, rng,
+                spends, bundler, sender, fee_payer, fee_token, calldata, gas, rng,
             )
             .await?;
         Ok(signable)
@@ -906,7 +987,7 @@ impl RailgunProvider {
             .build())
     }
 
-    /// Build a transaction builder into a broadcastable 7702 UserOperation.
+    /// Build spends into a broadcastable 7702 UserOperation.
     ///
     /// Constructs a UserOperation sent from the `delegator_address` that executes the provided
     /// transaction, with an additional fee note transfer to cover the bundler fees. The
@@ -914,7 +995,7 @@ impl RailgunProvider {
     /// address for the estimated fee amount in `fee_token`.
     pub async fn prepare_userop<S: SmartAccount>(
         &mut self,
-        builder: TransactionBuilder,
+        spends: &[Spend],
         bundler: &dyn Bundler,
         sender: &S,
         fee_payer: Arc<dyn RailgunSigner>,
@@ -923,34 +1004,33 @@ impl RailgunProvider {
         rng: &mut impl CryptoRng,
     ) -> Result<SignableUserOperation, RailgunProviderError> {
         let (privacy_paymaster, railgun_fee_adapter) = self.paymaster_contracts(fee_token)?;
-
-        let paymaster_railgun_address = paymaster_railgun_address(ChainId::evm(self.chain.id));
         let fee_asset = AssetId::Erc20(fee_token);
 
-        //? Initial arbitrary estimation of fee note value.
-        //? IMPORTANT: Needs to be high enough to not cause a revert. Most
-        //? bundlers seem to use a fixed maxCost value for estimation (IE 27_000_000
-        //? for pimlico). Setting this too low causes an unrecoverable estimation
-        //? failure.
+        // Initial arbitrary estimation of fee note value.
+        // IMPORTANT: Needs to be high enough to not cause a revert. Most
+        // bundlers seem to use a fixed maxCost value for estimation (IE 27_000_000
+        // for pimlico). Setting this too low causes an unrecoverable estimation
+        // failure.
         let mut fee_value = 100_000_000;
-
-        let builder = builder.adapt(railgun_fee_adapter, *sender.address().into_word());
 
         info!("Iteratively building UserOperation to converge on accurate fee estimate");
         for _ in 0..5 {
-            let broadcast_builder = builder.clone().transfer(
-                fee_payer.clone(),
-                paymaster_railgun_address,
-                fee_asset,
-                fee_value,
-                "fee",
-            );
-
             info!(
                 "Building broadcast transaction with fee value: {}",
                 fee_value
             );
-            let operations = self.build_operation(broadcast_builder, rng).await?;
+            let with_fee = self
+                .spends_with_fee(
+                    spends,
+                    fee_payer.clone(),
+                    fee_token,
+                    fee_value,
+                    railgun_fee_adapter,
+                    *sender.address().into_word(),
+                    rng,
+                )
+                .await?;
+            let operations = self.prove_spends(&with_fee, rng, true).await?;
 
             // Get the fee operation & note so the decrypted commitment data can be sent to the
             // paymaster.
@@ -1014,49 +1094,81 @@ impl RailgunProvider {
         ))));
     }
 
-    async fn all_unspent(&mut self) -> Vec<(UtxoNote, Option<PoiStatus>)> {
+    async fn all_unspent(&mut self) -> Vec<AnnotatedNote> {
         let addresses = self.utxo_indexer.registered();
         let mut all_notes = Vec::new();
-
         for address in addresses {
-            let mut notes = self.unspent(address).await;
-            all_notes.append(&mut notes);
+            all_notes.extend(self.unspent_notes(address).await);
         }
         all_notes
     }
 
-    async fn unspent(&mut self, address: RailgunAddress) -> Vec<(UtxoNote, Option<PoiStatus>)> {
-        let notes = self.utxo_indexer.unspent(address);
-
-        let Some(poi_provider) = &mut self.poi_provider else {
-            return notes.into_iter().map(|note| (note, None)).collect();
-        };
-
-        let mut annotated_notes = Vec::new();
-        for note in notes {
-            let status = poi_provider.status(note.blinded_commitment.into(), note.commitment_type);
-            annotated_notes.push((note, Some(status)));
-        }
-
-        annotated_notes
+    /// Attach the fee, then prove. `real` asks the spending signer; a dummy proof does not.
+    async fn prove_spends(
+        &mut self,
+        spends: &[Spend],
+        rng: &mut impl CryptoRng,
+        real: bool,
+    ) -> Result<Vec<ProvedOperation>, RailgunProviderError> {
+        self.ensure_notes_valid(spends)?;
+        let operations = spends
+            .iter()
+            .cloned()
+            .map(Spend::into_operation)
+            .collect::<Result<Vec<_>, _>>()?;
+        let prover = real.then_some(&self.prover);
+        Ok(prove_operations(
+            prover,
+            &self.utxo_indexer.utxo_trees,
+            self.chain.id,
+            &operations,
+            rng,
+        )
+        .await?)
     }
 
-    async fn build_operation(
+    fn ensure_notes_valid(&self, spends: &[Spend]) -> Result<(), SpendError> {
+        let Some(poi) = &self.poi_provider else {
+            return Ok(());
+        };
+        for spend in spends {
+            for note in spend.inputs() {
+                let status = poi.status(note.blinded_commitment.into(), note.commitment_type);
+                if status != PoiStatus::Valid {
+                    return Err(SpendError::NoteNotValid {
+                        blinded_commitment: note.blinded_commitment,
+                        status,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spends_with_fee(
         &mut self,
-        builder: TransactionBuilder,
+        spends: &[Spend],
+        fee_payer: Arc<dyn RailgunSigner>,
+        fee_token: Address,
+        fee: u128,
+        adapt_contract: Address,
+        adapt_params: [u8; 32],
         rng: &mut impl CryptoRng,
-    ) -> Result<Vec<ProvedOperation>, RailgunProviderError> {
+    ) -> Result<Vec<Spend>, RailgunProviderError> {
         let spendable = self.spendable_notes().await;
-        let built = builder
-            .build(
-                &self.prover,
-                self.chain.id,
-                &spendable.notes,
-                &self.utxo_indexer.utxo_trees,
-                rng,
-            )
-            .await;
-        spendable.explain(built)
+        let with_fee = attach_fee(
+            spends,
+            fee_payer,
+            paymaster_railgun_address(ChainId::evm(self.chain.id)),
+            AssetId::Erc20(fee_token),
+            fee,
+            &spendable.notes,
+            adapt_contract,
+            adapt_params,
+            rng,
+        );
+        spendable.explain(with_fee)
     }
 
     /// Notes usable as inputs, and the account/asset pairs that could not be observed.
@@ -1173,6 +1285,7 @@ mod poi_availability_tests {
             syncer::{SyncEvent, SyncerError, UtxoSyncer},
         },
         railgun_database::RailgunDB,
+        transact::SpendError,
     };
     use alloy::providers::Provider;
     use kohaku_kv_store::Store;
@@ -1273,18 +1386,45 @@ mod poi_availability_tests {
         assert_eq!(balance.len(), 1);
         assert_eq!(balance[0].amount, 10);
         assert_eq!(balance[0].poi_status, Some(PoiStatus::Unavailable));
-        let builder = provider
-            .transact()
-            .transfer(signer.clone(), signer.address(), asset, 1, "");
         let result = timeout(
             Duration::from_secs(5),
-            provider.build(builder, &mut rand::rng()),
+            provider.transfer_amount(
+                signer.clone(),
+                signer.address(),
+                asset,
+                1,
+                "",
+                &mut rand::rng(),
+            ),
         )
         .await
         .unwrap();
         assert!(matches!(
             result,
             Err(RailgunProviderError::PoiStatusUnavailable)
+        ));
+        let notes = timeout(
+            Duration::from_secs(5),
+            provider.unspent_notes(signer.address()),
+        )
+        .await
+        .unwrap();
+        let explicit = provider
+            .spend(signer.clone(), vec![notes[0].note.clone()])
+            .unwrap()
+            .transfer(signer.address(), 1, "")
+            .unwrap()
+            .with_change(&mut rand::rng())
+            .unwrap();
+        let explicit = timeout(
+            Duration::from_secs(5),
+            provider.prove(&[explicit], &mut rand::rng()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            explicit,
+            Err(RailgunProviderError::Spend(SpendError::NoteNotValid { .. }))
         ));
         assert!(
             timeout(Duration::from_millis(20), listener.accept())
@@ -1298,22 +1438,22 @@ mod poi_availability_tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (mut provider, signer, _) = fixture(&url, true).await;
-        let builder = provider.transact().transfer(
-            signer.clone(),
-            signer.address(),
-            AssetId::erc20(Address::repeat_byte(0x22)),
-            1,
-            "",
-        );
         assert!(matches!(
             timeout(
                 Duration::from_secs(5),
-                provider.build(builder, &mut rand::rng())
+                provider.transfer_amount(
+                    signer.clone(),
+                    signer.address(),
+                    AssetId::erc20(Address::repeat_byte(0x22)),
+                    1,
+                    "",
+                    &mut rand::rng(),
+                )
             )
             .await
             .unwrap(),
-            Err(RailgunProviderError::Build(
-                TransactionBuilderError::InsufficientBalance { .. }
+            Err(RailgunProviderError::Amount(
+                AmountError::InsufficientBalance { .. }
             ))
         ));
         assert!(
@@ -1385,7 +1525,7 @@ mod spendable_notes_tests {
         crypto::keys::{ByteKey, SpendingKey, ViewingKey},
         note::utxo::UtxoNote,
         poi::types::BlindedCommitmentType,
-        transact::TransactionBuilderError,
+        transact::AmountError,
     };
 
     fn signer() -> std::sync::Arc<PrivateKeySigner> {
@@ -1418,8 +1558,14 @@ mod spendable_notes_tests {
         let selected = SpendableNotes::from_unspent(
             true,
             vec![
-                (valid, Some(PoiStatus::Valid)),
-                (unavailable, Some(PoiStatus::Unavailable)),
+                AnnotatedNote {
+                    note: valid,
+                    poi_status: Some(PoiStatus::Valid),
+                },
+                AnnotatedNote {
+                    note: unavailable,
+                    poi_status: Some(PoiStatus::Unavailable),
+                },
             ],
         );
         assert_eq!(selected.notes.len(), 1);
@@ -1432,18 +1578,23 @@ mod spendable_notes_tests {
         let signer = signer();
         let asset = AssetId::erc20(Address::repeat_byte(0x11));
         let missing = note(signer.clone(), asset, 10);
-        let selected =
-            SpendableNotes::from_unspent(true, vec![(missing, Some(PoiStatus::Missing))]);
+        let selected = SpendableNotes::from_unspent(
+            true,
+            vec![AnnotatedNote {
+                note: missing,
+                poi_status: Some(PoiStatus::Missing),
+            }],
+        );
         assert!(selected.notes.is_empty());
-        let err = selected.explain(Err(TransactionBuilderError::InsufficientBalance {
+        let err = selected.explain(Err(AmountError::InsufficientBalance {
             from: signer.address(),
             asset,
             value: 1,
         }));
         assert!(matches!(
             err,
-            Err(RailgunProviderError::Build(
-                TransactionBuilderError::InsufficientBalance { .. }
+            Err(RailgunProviderError::Amount(
+                AmountError::InsufficientBalance { .. }
             ))
         ));
     }
@@ -1454,17 +1605,22 @@ mod spendable_notes_tests {
         let wanted = AssetId::erc20(Address::repeat_byte(0x11));
         let other = AssetId::erc20(Address::repeat_byte(0x22));
         let unavailable = note(signer.clone(), other, 10);
-        let selected =
-            SpendableNotes::from_unspent(true, vec![(unavailable, Some(PoiStatus::Unavailable))]);
-        let err = selected.explain(Err(TransactionBuilderError::InsufficientBalance {
+        let selected = SpendableNotes::from_unspent(
+            true,
+            vec![AnnotatedNote {
+                note: unavailable,
+                poi_status: Some(PoiStatus::Unavailable),
+            }],
+        );
+        let err = selected.explain(Err(AmountError::InsufficientBalance {
             from: signer.address(),
             asset: wanted,
             value: 1,
         }));
         assert!(matches!(
             err,
-            Err(RailgunProviderError::Build(
-                TransactionBuilderError::InsufficientBalance { .. }
+            Err(RailgunProviderError::Amount(
+                AmountError::InsufficientBalance { .. }
             ))
         ));
     }
@@ -1474,9 +1630,14 @@ mod spendable_notes_tests {
         let signer = signer();
         let asset = AssetId::erc20(Address::repeat_byte(0x11));
         let unavailable = note(signer.clone(), asset, 10);
-        let selected =
-            SpendableNotes::from_unspent(true, vec![(unavailable, Some(PoiStatus::Unavailable))]);
-        let err = selected.explain(Err(TransactionBuilderError::InsufficientBalance {
+        let selected = SpendableNotes::from_unspent(
+            true,
+            vec![AnnotatedNote {
+                note: unavailable,
+                poi_status: Some(PoiStatus::Unavailable),
+            }],
+        );
+        let err = selected.explain(Err(AmountError::InsufficientBalance {
             from: signer.address(),
             asset,
             value: 1,

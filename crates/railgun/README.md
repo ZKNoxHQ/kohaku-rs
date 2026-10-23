@@ -32,6 +32,13 @@ should display `Unavailable` as unknown and must not use it to authorize proof
 resubmission. A blocked shield is not queried on its own; once the list is
 caught up it is `Missing`.
 
+A copied page becomes visible only after root validation and its batch save
+complete. Cancelling sync during either step preserves the published in-memory
+prefix. If a backend committed before its save acknowledgement was lost, a
+reopen may load that validated page; the existing instance can safely reacquire
+and replay it. This does not add stronger atomicity or crash guarantees to the
+selected storage backend.
+
 ## Controlling POI proof submission
 
 With POI enabled, `sync()` and `sync_to()` retain the automatic workflow:

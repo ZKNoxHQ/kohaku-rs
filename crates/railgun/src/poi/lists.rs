@@ -7,10 +7,7 @@ use tracing::{info, warn};
 
 use crate::{
     common::sleep,
-    merkle_tree::{
-        MerkleRoot, PoiMerkleProof, PoiMerkleTree, PoiMerkleTreeState, TOTAL_LEAVES,
-        is_poi_empty_leaf,
-    },
+    merkle_tree::{PoiMerkleProof, PoiMerkleTree, TOTAL_LEAVES, is_poi_empty_leaf},
     poi::{
         client::{PoiClientError, PoiNodeClient},
         types::{BlindedCommitment, ListKey},
@@ -107,7 +104,7 @@ impl PoiLists {
         self.lists.get(list_key).is_some_and(|list| list.caught_up)
     }
 
-    /// Copies each list forward from its saved cursor. One request at a time.
+    /// Copies each list forward from its saved cursor, with bounded parallel page fetches.
     pub async fn sync(&mut self, client: &impl PoiNodeClient) -> Result<(), PoiSyncError> {
         let list_keys: Vec<ListKey> = self.lists.keys().cloned().collect();
         for list_key in list_keys {
@@ -141,18 +138,17 @@ impl PoiLists {
             let Some(&(_, span_end)) = ranges.last() else {
                 return Ok(());
             };
-            let mut pages = futures::stream::iter(ranges.iter().map(|&(page_start, page_end)| {
-                async move {
+            let mut pages =
+                futures::stream::iter(ranges.iter().map(|&(page_start, page_end)| async move {
                     let page =
                         retry(|| client.merkletree_leaves(list_key, page_start, page_end)).await;
                     (page_start, page_end, page)
-                }
-            }))
-            .buffered(PARALLEL_FETCHES);
+                }))
+                .buffered(PARALLEL_FETCHES);
 
             // Applied in order; the first page that is not full ends the batch.
-            let snapshots = self.snapshot(list_key, start, (span_end - start) as usize);
-            let mut previous = Vec::new();
+            // Keep every in-flight page out of the published trees and membership index.
+            let mut candidate = self.lists[list_key].stage(start, (span_end - start) as usize);
             let mut roots = Vec::new();
             let mut cursor = start;
             let mut pages_applied = 0;
@@ -184,13 +180,13 @@ impl PoiLists {
                     break;
                 }
 
-                previous.extend(self.previous_positions(list_key, real));
-                self.lists
-                    .get_mut(list_key)
-                    .expect("POI list loaded at startup")
-                    .insert_range(page_start, real);
-                // Every page's roots, as when the pages were checked one by one.
-                roots.extend(self.roots(list_key, &touched_trees(page_start, real_len)));
+                candidate.insert_range(page_start, real);
+                // Validate every page's roots, preserving the batched copy's trust boundary.
+                roots.extend(
+                    touched_trees(page_start, real_len)
+                        .iter()
+                        .map(|number| candidate.trees[number].root()),
+                );
                 cursor = page_start + real_len as u64;
                 pages_applied += 1;
                 if real_len < page.len() {
@@ -214,15 +210,7 @@ impl PoiLists {
                 return Ok(());
             }
 
-            let accepted = match retry(|| client.validate_poi_merkleroots(list_key, &roots)).await {
-                Ok(accepted) => accepted,
-                Err(err) => {
-                    self.restore(list_key, snapshots, previous);
-                    return Err(err.into());
-                }
-            };
-            if !accepted {
-                self.restore(list_key, snapshots, previous);
+            if !retry(|| client.validate_poi_merkleroots(list_key, &roots)).await? {
                 if pages_applied > 1 {
                     batch_pages = 1;
                     narrowed = true;
@@ -233,19 +221,27 @@ impl PoiLists {
                 });
             }
 
-            self.lists
-                .get_mut(list_key)
-                .expect("POI list loaded at startup")
-                .next_index = cursor;
+            // Only persist/publish trees actually touched before the batch stopped.
             let tree_numbers = touched_trees(start, (cursor - start) as usize);
-            if let Err(err) = self.persist(list_key, &tree_numbers).await {
-                self.restore(list_key, snapshots, previous);
-                self.lists
-                    .get_mut(list_key)
-                    .expect("POI list loaded at startup")
-                    .next_index = start;
-                return Err(err);
-            }
+            candidate
+                .trees
+                .retain(|number, _| tree_numbers.contains(number));
+            let trees: Vec<_> = candidate
+                .trees
+                .iter()
+                .map(|(number, tree)| (*number, tree.state()))
+                .collect();
+            write_poi_snapshot(&self.db, list_key, cursor, &trees).await?;
+
+            // No await between durable save and publication. A cancelled save may have committed;
+            // the next sync can replay the validated batch, or a reopen can load it.
+            let list = self
+                .lists
+                .get_mut(list_key)
+                .expect("POI list loaded at startup");
+            list.trees.extend(candidate.trees);
+            list.index.extend(candidate.index);
+            list.next_index = cursor;
             info!("Synced POI list {list_key} through leaf {cursor}");
 
             if let Some(err) = stopped {
@@ -263,94 +259,31 @@ impl PoiLists {
             }
         }
     }
-
-    fn snapshot(
-        &self,
-        list_key: &ListKey,
-        start: u64,
-        count: usize,
-    ) -> Vec<(u32, Option<PoiMerkleTreeState>)> {
-        let list = &self.lists[list_key];
-        touched_trees(start, count)
-            .into_iter()
-            .map(|number| (number, list.trees.get(&number).map(|tree| tree.state())))
-            .collect()
-    }
-
-    fn previous_positions(
-        &self,
-        list_key: &ListKey,
-        leaves: &[U256],
-    ) -> Vec<(BlindedCommitment, Option<(u32, u32)>)> {
-        let list = &self.lists[list_key];
-        leaves
-            .iter()
-            .map(|leaf| {
-                let commitment = BlindedCommitment::from(*leaf);
-                (commitment, list.index.get(&commitment).copied())
-            })
-            .collect()
-    }
-
-    fn roots(&self, list_key: &ListKey, tree_numbers: &[u32]) -> Vec<MerkleRoot> {
-        let list = &self.lists[list_key];
-        tree_numbers
-            .iter()
-            .filter_map(|number| list.trees.get(number).map(|tree| tree.root()))
-            .collect()
-    }
-
-    fn restore(
-        &mut self,
-        list_key: &ListKey,
-        snapshots: Vec<(u32, Option<PoiMerkleTreeState>)>,
-        previous: Vec<(BlindedCommitment, Option<(u32, u32)>)>,
-    ) {
-        let list = self
-            .lists
-            .get_mut(list_key)
-            .expect("POI list loaded at startup");
-        // Newest first: a commitment seen twice in one batch ends at its position before both.
-        for (commitment, position) in previous.into_iter().rev() {
-            match position {
-                Some(position) => {
-                    list.index.insert(commitment, position);
-                }
-                None => {
-                    list.index.remove(&commitment);
-                }
-            }
-        }
-        for (number, state) in snapshots {
-            match state {
-                Some(state) => {
-                    list.trees.insert(number, PoiMerkleTree::from_state(state));
-                }
-                None => {
-                    list.trees.remove(&number);
-                }
-            }
-        }
-    }
-
-    async fn persist(&self, list_key: &ListKey, tree_numbers: &[u32]) -> Result<(), PoiSyncError> {
-        let list = &self.lists[list_key];
-        let states: Vec<(u32, PoiMerkleTreeState)> = tree_numbers
-            .iter()
-            .map(|number| {
-                (
-                    *number,
-                    list.trees.get(number).expect("touched POI tree").state(),
-                )
-            })
-            .collect();
-        let next_index = list.next_index;
-        write_poi_snapshot(&self.db, list_key, next_index, &states).await?;
-        Ok(())
-    }
 }
 
 impl PoiList {
+    /// Clone only trees touched by this batch; the full commitment index is not cloned.
+    /// The candidate index records new positions only and is merged after the save succeeds.
+    fn stage(&self, start: u64, count: usize) -> Self {
+        let trees = touched_trees(start, count)
+            .into_iter()
+            .map(|number| {
+                let tree = self
+                    .trees
+                    .get(&number)
+                    .cloned()
+                    .unwrap_or_else(|| PoiMerkleTree::new(number));
+                (number, tree)
+            })
+            .collect();
+        Self {
+            trees,
+            index: HashMap::new(),
+            next_index: start,
+            caught_up: false,
+        }
+    }
+
     async fn load(db: &Store, list_key: &ListKey) -> Result<Self, DatabaseError> {
         let next_index = db.get_poi_sync(list_key).await?.next_index;
         let mut trees = HashMap::new();
@@ -444,12 +377,13 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
-    use super::*;
-    use crate::poi::types::TransactProofData;
     use kohaku_kv_store::{
         backend::{KvStoreBackend, StoreError},
         memory::MemoryStore,
     };
+
+    use super::*;
+    use crate::{merkle_tree::MerkleRoot, poi::types::TransactProofData};
 
     #[derive(Clone, Copy)]
     enum LeafPages {
@@ -470,6 +404,11 @@ mod tests {
         published: Mutex<Option<Vec<MerkleRoot>>>,
         root_checks: AtomicUsize,
         pages: LeafPages,
+        pause_root: AtomicBool,
+        pause_root_after: AtomicUsize,
+        pause_fetch_at: AtomicUsize,
+        entered_fetch: tokio::sync::Notify,
+        entered_root: tokio::sync::Notify,
     }
 
     impl FakeNode {
@@ -493,6 +432,11 @@ mod tests {
                 published: Mutex::new(None),
                 root_checks: AtomicUsize::new(0),
                 pages,
+                pause_root: AtomicBool::new(false),
+                pause_root_after: AtomicUsize::new(usize::MAX),
+                pause_fetch_at: AtomicUsize::new(usize::MAX),
+                entered_fetch: tokio::sync::Notify::new(),
+                entered_root: tokio::sync::Notify::new(),
             }
         }
 
@@ -532,6 +476,10 @@ mod tests {
             start_index: u64,
             end_index: u64,
         ) -> Result<Vec<U256>, PoiClientError> {
+            if start_index as usize == self.pause_fetch_at.load(Ordering::Relaxed) {
+                self.entered_fetch.notify_one();
+                std::future::pending::<()>().await;
+            }
             match self.pages {
                 LeafPages::Empty => Ok(Vec::new()),
                 LeafPages::Exact => {
@@ -559,6 +507,13 @@ mod tests {
             _list_key: &ListKey,
             roots: &[MerkleRoot],
         ) -> Result<bool, PoiClientError> {
+            if self.pause_root.load(Ordering::Relaxed)
+                || self.root_checks.load(Ordering::Relaxed)
+                    >= self.pause_root_after.load(Ordering::Relaxed)
+            {
+                self.entered_root.notify_one();
+                std::future::pending::<()>().await;
+            }
             let n = self.root_checks.fetch_add(1, Ordering::Relaxed);
             if let Some(published) = &*self.published.lock().unwrap() {
                 return Ok(roots.iter().all(|root| published.contains(root)));
@@ -835,5 +790,226 @@ mod tests {
         let reloaded = PoiLists::load(kept, &[key.clone()]).await.unwrap();
         assert_eq!(reloaded.next_index(&key), 0);
         assert!(!reloaded.contains(&key, BlindedCommitment::from(U256::from(1u8))));
+    }
+    #[tokio::test]
+    async fn cancelled_root_validation_does_not_publish_unvalidated_leaves() {
+        let db = Store::create();
+        let key = list_key();
+        let old = BlindedCommitment::from(U256::from(1));
+        let new = BlindedCommitment::from(U256::from(2));
+        let node = FakeNode::new(vec![U256::from(1)], true);
+        let mut lists = PoiLists::load(db.clone(), std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        lists.sync(&node).await.unwrap();
+        node.set_leaves(vec![U256::from(1), U256::from(2)]);
+        node.pause_root.store(true, Ordering::Relaxed);
+        let mut sync = Box::pin(lists.sync(&node));
+        tokio::select! {
+            result = &mut sync => panic!("root validation should block: {result:?}"),
+            () = node.entered_root.notified() => {},
+        }
+        drop(sync);
+        assert_eq!(lists.next_index(&key), 1);
+        assert!(!lists.caught_up(&key));
+        assert!(lists.contains(&key, old));
+        assert!(!lists.contains(&key, new));
+        assert!(lists.proof(&key, new).is_none());
+        let reloaded = PoiLists::load(db, std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        assert_eq!(reloaded.next_index(&key), 1);
+        assert!(!reloaded.contains(&key, new));
+        // A buggy node may return different leaves when the cancelled page is re-fetched.
+        // The abandoned value must never survive as a stale membership-index entry.
+        let replacement = BlindedCommitment::from(U256::from(3));
+        node.set_leaves(vec![U256::from(1), U256::from(3)]);
+        node.pause_root.store(false, Ordering::Relaxed);
+        lists.sync(&node).await.unwrap();
+        assert_eq!(lists.next_index(&key), 2);
+        assert!(!lists.contains(&key, new));
+        assert!(lists.proof(&key, new).is_none());
+        let proof = lists.proof(&key, replacement).unwrap();
+        assert_eq!(proof.element, U256::from(3));
+        assert!(proof.verify());
+    }
+    struct PausingWrites {
+        inner: std::sync::Arc<MemoryStore>,
+        paused: std::sync::Arc<AtomicBool>,
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        after_commit: bool,
+        writes: AtomicUsize,
+        pause_after: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl KvStoreBackend for PausingWrites {
+        async fn get_batch(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+            self.inner.get_batch(keys).await
+        }
+        async fn put_batch(&self, values: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+            if self.after_commit {
+                self.inner.put_batch(values).await?;
+            }
+            let write = self.writes.fetch_add(1, Ordering::Relaxed);
+            if self.paused.load(Ordering::Relaxed) && write >= self.pause_after {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            if !self.after_commit {
+                self.inner.put_batch(values).await?;
+            }
+            Ok(())
+        }
+        async fn delete_batch(&self, keys: &[&[u8]]) -> Result<(), StoreError> {
+            self.inner.delete_batch(keys).await
+        }
+    }
+
+    async fn cancel_save(after_commit: bool, batched: bool) {
+        let paused = std::sync::Arc::new(AtomicBool::new(false));
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let db = Store::new(PausingWrites {
+            inner: std::sync::Arc::new(MemoryStore::new()),
+            paused: paused.clone(),
+            entered: entered.clone(),
+            after_commit,
+            writes: AtomicUsize::new(0),
+            pause_after: if batched { 2 } else { 1 },
+        });
+        let key = list_key();
+        let old = BlindedCommitment::from(U256::from(1));
+        let published = if batched { 101 } else { 1 };
+        let end = if batched { 351 } else { 2 };
+        let new = BlindedCommitment::from(U256::from(published + 1));
+        let node = FakeNode::new(vec![U256::from(1)], true);
+        let mut lists = PoiLists::load(db.clone(), std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        lists.sync(&node).await.unwrap();
+        node.set_leaves(leaves(end));
+        paused.store(true, Ordering::Relaxed);
+        let mut sync = Box::pin(lists.sync(&node));
+        tokio::select! {
+            result = &mut sync => panic!("save should block: {result:?}"),
+            () = entered.notified() => {},
+        }
+        drop(sync);
+        assert_eq!(lists.next_index(&key), u64::from(published));
+        assert!(!lists.caught_up(&key));
+        assert!(lists.contains(&key, old));
+        assert!(!lists.contains(&key, new));
+        assert!(lists.proof(&key, new).is_none());
+        let reloaded = PoiLists::load(db.clone(), std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        assert_eq!(
+            reloaded.next_index(&key),
+            u64::from(if after_commit { end } else { published })
+        );
+        assert_eq!(reloaded.contains(&key, new), after_commit);
+        // A committed-but-unacknowledged snapshot may be ahead on disk. Replaying from the
+        // published in-memory prefix must remain safe and must not duplicate the page.
+        paused.store(false, Ordering::Relaxed);
+        lists.sync(&node).await.unwrap();
+        assert_eq!(lists.next_index(&key), u64::from(end));
+        assert!(lists.caught_up(&key));
+        assert!(lists.proof(&key, new).unwrap().verify());
+        let reloaded = PoiLists::load(db, std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        assert_eq!(reloaded.next_index(&key), u64::from(end));
+        assert!(reloaded.proof(&key, new).unwrap().verify());
+    }
+
+    #[tokio::test]
+    async fn cancelled_save_does_not_publish_the_uncommitted_page() {
+        cancel_save(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn lost_save_ack_can_replay_from_the_published_prefix() {
+        cancel_save(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_batch_save_preserves_the_published_prefix() {
+        cancel_save(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn lost_batch_save_ack_can_replay_from_the_published_prefix() {
+        cancel_save(true, true).await;
+    }
+
+    // The first page commits, then a later batch is abandoned after it has staged leaves.
+    // Fetching adds an await between page insertions that the pre-batching PR did not have.
+    async fn cancel_later_batch(during_fetch: bool) {
+        let db = Store::create();
+        let key = list_key();
+        let node = FakeNode::new(leaves(450), true);
+        if during_fetch {
+            node.pause_fetch_at.store(200, Ordering::Relaxed);
+        } else {
+            node.pause_root_after.store(1, Ordering::Relaxed);
+        }
+        let mut lists = PoiLists::load(db.clone(), std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        let mut sync = Box::pin(lists.sync(&node));
+        tokio::select! {
+            result = &mut sync => panic!("later batch should block: {result:?}"),
+            () = async {
+                if during_fetch {
+                    node.entered_fetch.notified().await;
+                } else {
+                    node.entered_root.notified().await;
+                }
+            } => {},
+        }
+        drop(sync);
+        let old = BlindedCommitment::from(U256::from(100));
+        let abandoned = BlindedCommitment::from(U256::from(101));
+        assert_eq!(lists.next_index(&key), 100);
+        assert!(!lists.caught_up(&key));
+        assert!(lists.proof(&key, old).unwrap().verify());
+        assert!(!lists.contains(&key, abandoned));
+        assert!(lists.proof(&key, abandoned).is_none());
+        let reloaded = PoiLists::load(db.clone(), std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        assert_eq!(reloaded.next_index(&key), 100);
+        assert!(reloaded.proof(&key, old).unwrap().verify());
+        assert!(!reloaded.contains(&key, abandoned));
+
+        let mut replacement = leaves(450);
+        for leaf in &mut replacement[100..] {
+            *leaf += U256::from(1_000);
+        }
+        node.set_leaves(replacement);
+        node.pause_fetch_at.store(usize::MAX, Ordering::Relaxed);
+        node.pause_root_after.store(usize::MAX, Ordering::Relaxed);
+        lists.sync(&node).await.unwrap();
+        assert_eq!(lists.next_index(&key), 450);
+        assert!(lists.caught_up(&key));
+        assert!(!lists.contains(&key, abandoned));
+        let replacement = BlindedCommitment::from(U256::from(1_101));
+        assert!(lists.proof(&key, replacement).unwrap().verify());
+        let reloaded = PoiLists::load(db, std::slice::from_ref(&key))
+            .await
+            .unwrap();
+        assert_eq!(reloaded.next_index(&key), 450);
+        assert!(!reloaded.contains(&key, abandoned));
+        assert!(reloaded.proof(&key, replacement).unwrap().verify());
+    }
+
+    #[tokio::test]
+    async fn cancelled_batch_fetch_preserves_the_published_prefix() {
+        cancel_later_batch(true).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_batch_validation_preserves_the_published_prefix() {
+        cancel_later_batch(false).await;
     }
 }

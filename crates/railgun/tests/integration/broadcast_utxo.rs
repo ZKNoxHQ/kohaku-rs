@@ -18,7 +18,6 @@ use kohaku_railgun::{
     chain_config::ChainConfig,
     crypto::keys::{HexKey, SpendingKey, ViewingKey},
     indexer::syncer::{ChainedSyncer, RpcSyncer, SubsquidSyncer},
-    transact::TransactionBuilder,
 };
 use kohaku_userop_kit::{
     bundler::{Bundler, pimlico::PimlicoBundler},
@@ -131,12 +130,15 @@ async fn test_broadcast_utxo() -> Result<(), anyhow::Error> {
     );
 
     info!("Testing unshielding");
-    let tx = TransactionBuilder::new().unshield(
-        railgun_signer.clone(),
-        smart_account_signer.address(),
-        weth,
-        5_000,
-    )?;
+    let spends = railgun
+        .unshield_amount(
+            railgun_signer.clone(),
+            smart_account_signer.address(),
+            weth,
+            5_000,
+            &mut rand::rng(),
+        )
+        .await?;
 
     let unwrap_call = simple_smart_account::Call {
         target: chain.wrapped_base_token,
@@ -146,7 +148,7 @@ async fn test_broadcast_utxo() -> Result<(), anyhow::Error> {
 
     let signable = railgun
         .prepare_userop(
-            tx,
+            &spends,
             bundler.as_ref(),
             &smart_account,
             railgun_signer.clone(),

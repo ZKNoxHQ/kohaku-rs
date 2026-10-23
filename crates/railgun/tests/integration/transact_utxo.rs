@@ -14,7 +14,6 @@ use kohaku_railgun::{
     caip::AssetId,
     chain_config::ChainConfig,
     indexer::syncer::{ChainedSyncer, RpcSyncer, SubsquidSyncer},
-    transact::TransactionBuilder,
 };
 use rand::random;
 use tracing::info;
@@ -178,16 +177,28 @@ async fn test_transact_utxo() {
         None
     );
 
-    // Test Transfer
+    // Test Transfer of one chosen note, not an amount selected inside prove.
     info!("Testing transfer");
-    let tx = TransactionBuilder::new().transfer(
-        account_1.clone(),
-        account_2.address(),
-        weth,
-        5_000,
-        "test transfer",
-    );
-    let transfer_tx = railgun.build(tx, &mut rand::rng()).await.unwrap();
+    let mut chosen = Vec::new();
+    let mut covering = 0u128;
+    for annotated in railgun.unspent_notes(account_1.address()).await {
+        if annotated.note.asset != weth {
+            continue;
+        }
+        covering += annotated.note.value;
+        chosen.push(annotated.note);
+        if covering >= 5_000 {
+            break;
+        }
+    }
+    let spend = railgun
+        .spend(account_1.clone(), chosen)
+        .unwrap()
+        .transfer(account_2.address(), 5_000, "test transfer")
+        .unwrap()
+        .with_change(&mut rand::rng())
+        .unwrap();
+    let transfer_tx = railgun.prove(&[spend], &mut rand::rng()).await.unwrap();
 
     provider
         .send_transaction(transfer_tx.tx_data.into())
@@ -212,15 +223,17 @@ async fn test_transact_utxo() {
 
     // Test Unshielding
     info!("Testing unshielding");
-    let tx = TransactionBuilder::new()
-        .unshield(
+    let spends = railgun
+        .unshield_amount(
             account_1.clone(),
             address!("0xe03747a83E600c3ab6C2e16dd1989C9b419D3a86"),
             weth,
             1_000,
+            &mut rand::rng(),
         )
+        .await
         .unwrap();
-    let unshield_tx = railgun.build(tx, &mut rand::rng()).await.unwrap();
+    let unshield_tx = railgun.prove(&spends, &mut rand::rng()).await.unwrap();
 
     provider
         .send_transaction(unshield_tx.tx_data.into())
