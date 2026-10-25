@@ -13,7 +13,7 @@ use crate::{
         indexed_account::IndexedAccount,
         syncer::{self, SyncEvent, SyncerError, UtxoSyncer},
     },
-    merkle_tree::{MerkleTreeVerifier, UtxoLeafHash, UtxoMerkleTree},
+    merkle_tree::{MerkleTreeError, MerkleTreeVerifier, UtxoLeafHash, UtxoMerkleTree},
     note::utxo::{NoteError, UtxoNote},
     railgun_database::{DatabaseError, RailgunDB, write_utxo_snapshot},
     state::RailgunState,
@@ -47,6 +47,8 @@ pub enum UtxoIndexerError {
     NoteError(#[from] NoteError),
     #[error("Database error: {0}")]
     DatabaseError(#[from] DatabaseError),
+    #[error("Merkle tree error: {0}")]
+    MerkleTree(#[from] MerkleTreeError),
     #[error("Timed out waiting for commitments")]
     Timeout,
 }
@@ -63,7 +65,7 @@ impl UtxoIndexer {
         for number in state.trees.clone() {
             let tree_state = db.get_utxo_tree(number).await?;
             if let Some(tree_state) = tree_state {
-                utxo_trees.insert(number, UtxoMerkleTree::from_state(tree_state));
+                utxo_trees.insert(number, UtxoMerkleTree::from_state(tree_state)?);
             }
         }
 
@@ -185,7 +187,7 @@ impl UtxoIndexer {
                 .utxo_trees
                 .entry(tree_number)
                 .or_insert(UtxoMerkleTree::new(tree_number))
-                .insert_leaves(&hashes, start as usize);
+                .insert_leaves(&hashes, start as usize)?;
         }
 
         // Verify
@@ -213,7 +215,7 @@ impl UtxoIndexer {
             utxo_trees: self
                 .utxo_trees
                 .iter()
-                .map(|(number, tree)| (*number, UtxoMerkleTree::from_state(tree.state())))
+                .map(|(number, tree)| (*number, tree.clone()))
                 .collect(),
             accounts: self
                 .accounts
@@ -302,7 +304,7 @@ impl UtxoIndexer {
 
             let known = self
                 .utxo_verifier
-                .verify_root(tree.number(), tree.leaves_len() as u32 - 1, tree.root())
+                .verify_root(tree.number(), tree.leaves_len() as u32 - 1, tree.root()?)
                 .await
                 .map_err(|e| UtxoIndexerError::VerificationError(e))?;
             // A root the chain never had means the local tree is missing or has wrong leaves:

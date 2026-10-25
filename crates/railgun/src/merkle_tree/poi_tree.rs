@@ -1,20 +1,19 @@
-use kohaku_crypto::{merkle_tree::MerkleConfig, poseidon_hash};
+use kohaku_crypto::poseidon_hash;
+use kohaku_merkle_tree::hasher::Hasher;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
-use crate::merkle_tree::TREE_DEPTH;
+use crate::merkle_tree::merkle_tree::NumberedMerkleTree;
 
 /// POI list accumulator. Same depth and Poseidon hash as the Railgun UTXO tree.
 /// The zero is the PPOI node's constant, kept separate so the list follows the
 /// node if the UTXO zero ever changes. Today the two integers are equal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PoiMerkleConfig;
+#[derive(Debug, Clone, Copy)]
+pub struct PoiHasher;
 
-impl MerkleConfig for PoiMerkleConfig {
-    const DEPTH: usize = TREE_DEPTH;
-
-    fn hash(left: U256, right: U256) -> U256 {
-        poseidon_hash(&[left, right]).unwrap()
+impl Hasher<2, U256> for PoiHasher {
+    fn hash(children: [U256; 2]) -> U256 {
+        poseidon_hash(&children).unwrap()
     }
 
     fn zero() -> U256 {
@@ -29,9 +28,7 @@ impl MerkleConfig for PoiMerkleConfig {
     }
 }
 
-pub type PoiMerkleTree = kohaku_crypto::merkle_tree::MerkleTree<PoiMerkleConfig>;
-pub type PoiMerkleProof = kohaku_crypto::merkle_tree::MerkleProof<PoiMerkleConfig>;
-pub type PoiMerkleTreeState = kohaku_crypto::merkle_tree::MerkleTreeState<PoiMerkleConfig>;
+pub type PoiMerkleTree = NumberedMerkleTree<PoiHasher>;
 
 /// How far a list has been copied locally. The next fetch starts at `next_index`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -42,7 +39,7 @@ pub struct PoiSyncState {
 /// A missing leaf in a `ppoi_poi_merkletree_leaves` page. The node pads past the
 /// end of the list with this value, so it is never inserted.
 pub fn is_poi_empty_leaf(leaf: U256) -> bool {
-    leaf == PoiMerkleConfig::zero()
+    leaf == PoiHasher::zero()
 }
 
 #[cfg(all(test, native))]
@@ -52,7 +49,7 @@ mod tests {
 
     #[test]
     fn poi_zero_matches_the_node_constant() {
-        let zero = PoiMerkleConfig::zero();
+        let zero = PoiHasher::zero();
         let expected = U256::from_str_radix(
             "0488f89b25bc7011eaf6a5edce71aeafb9fe706faa3c0a5cd9cbe868ae3b9ffc",
             16,
@@ -60,18 +57,5 @@ mod tests {
         .unwrap();
         assert_eq!(zero, expected);
         assert!(zero < SNARK_PRIME);
-    }
-
-    #[test]
-    fn inserted_leaf_has_a_valid_inclusion_proof() {
-        let mut tree = PoiMerkleTree::new(0);
-        let leaves = [U256::from(1u8), U256::from(2u8), U256::from(3u8)];
-        tree.insert_leaves(&leaves, 0);
-
-        assert_eq!(tree.leaves(), &leaves);
-        let proof = tree.generate_proof_at(1).unwrap();
-        assert!(proof.verify());
-        assert_eq!(proof.element, U256::from(2u8));
-        assert!(tree.generate_proof(U256::from(4u8)).is_err());
     }
 }

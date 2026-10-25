@@ -491,7 +491,7 @@ mod tests {
         let mut leaves: Vec<_> = notes.iter().filter(|n| n.tree_number == number).collect();
         leaves.sort_by_key(|n| n.leaf_index);
         let hashes: Vec<_> = leaves.iter().map(|n| n.hash).collect();
-        tree.insert_leaves(&hashes, 0);
+        tree.insert_leaves(&hashes, 0).unwrap();
         BTreeMap::from([(number, tree)])
     }
 

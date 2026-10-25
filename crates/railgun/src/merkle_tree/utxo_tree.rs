@@ -5,6 +5,7 @@ use crate::merkle_tree::{MerkleProof, MerkleRoot, MerkleTree, MerkleTreeError, M
 
 /// UTXO trees track the state of all notes in Railgun. New UTXOs are added as
 /// leaves whenever new commitments are observed from the Railgun smart contracts.
+#[derive(Clone)]
 pub struct UtxoMerkleTree {
     inner: MerkleTree,
 }
@@ -19,17 +20,17 @@ impl UtxoMerkleTree {
         }
     }
 
-    pub fn from_state(state: MerkleTreeState) -> Self {
-        UtxoMerkleTree {
-            inner: MerkleTree::from_state(state),
-        }
+    pub fn from_state(state: MerkleTreeState) -> Result<Self, MerkleTreeError> {
+        Ok(UtxoMerkleTree {
+            inner: MerkleTree::from_state(state)?,
+        })
     }
 
     pub fn number(&self) -> u32 {
         self.inner.number()
     }
 
-    pub fn root(&self) -> MerkleRoot {
+    pub fn root(&self) -> Result<MerkleRoot, MerkleTreeError> {
         self.inner.root()
     }
 
@@ -46,9 +47,13 @@ impl UtxoMerkleTree {
     }
 
     /// Append leaves to the end of the tree and immediately rebuild.
-    pub fn insert_leaves(&mut self, leaves: &[UtxoLeafHash], start_position: usize) {
+    pub fn insert_leaves(
+        &mut self,
+        leaves: &[UtxoLeafHash],
+        start_position: usize,
+    ) -> Result<(), MerkleTreeError> {
         let u256s: Vec<U256> = leaves.iter().map(|l| (*l).into()).collect();
-        self.inner.insert_leaves(&u256s, start_position);
+        self.inner.insert_leaves(&u256s, start_position)
     }
 }
 

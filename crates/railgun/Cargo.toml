@@ -34,6 +34,7 @@ ark-std = { workspace = true }
 async-trait = { workspace = true }
 bech32 = { workspace = true }
 kohaku-crypto = { workspace = true }
+kohaku-merkle-tree = { workspace = true }
 ctr = { workspace = true }
 curve25519-dalek = { workspace = true }
 ed25519-dalek = { workspace = true }

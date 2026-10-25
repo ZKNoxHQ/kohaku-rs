@@ -716,14 +716,19 @@ async fn root_outage_then_reopen_preserves_checkpoint_and_replays_without_duplic
             Some((0, 1))
         );
         let mut expected = TxidMerkleTree::new(0);
-        expected.insert_leaves(
-            &[
-                TxidLeafHash::new(txid(&operation(10, 0)), 0, UtxoTreeIndex::included(0, 0)),
-                TxidLeafHash::new(txid(&operation(20, 1)), 0, UtxoTreeIndex::included(0, 1)),
-            ],
-            0,
+        expected
+            .insert_leaves(
+                &[
+                    TxidLeafHash::new(txid(&operation(10, 0)), 0, UtxoTreeIndex::included(0, 0)),
+                    TxidLeafHash::new(txid(&operation(20, 1)), 0, UtxoTreeIndex::included(0, 1)),
+                ],
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            restored.tree(0).unwrap().root().unwrap(),
+            expected.root().unwrap()
         );
-        assert_eq!(restored.tree(0).unwrap().root(), expected.root());
     }
     service.close().await;
 }

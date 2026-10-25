@@ -8,7 +8,7 @@ use crate::{
     account::signer::{RailgunSigner, RailgunSignerError},
     caip::AssetId,
     crypto::keys::U256Key,
-    merkle_tree::{MerkleRoot, MerkleTreeError, UtxoMerkleTree},
+    merkle_tree::{MerkleRoot, MerkleTreeError, UtxoMerkleTree, proof_indices},
     note::{Note, utxo::UtxoNote},
 };
 
@@ -102,7 +102,7 @@ impl TransactCircuitInputs {
             return Err(TransactCircuitInputsError::EmptyInputNotes);
         }
 
-        let merkleroot = merkle_tree.root();
+        let merkleroot = merkle_tree.root()?;
         let merkle_proofs: Vec<_> = notes_in
             .iter()
             .map(|note| merkle_tree.generate_proof(note.hash()))
@@ -136,12 +136,12 @@ impl TransactCircuitInputs {
             .map(|note| U256::from(note.value()))
             .collect();
 
-        let path_elements = merkle_proofs.iter().map(|p| p.elements.clone()).collect();
-
-        let leaves_indices = merkle_proofs
+        let path_elements = merkle_proofs
             .iter()
-            .map(|p| U256::from(p.indices))
+            .map(|p| p.sibling_paths().to_vec())
             .collect();
+
+        let leaves_indices = merkle_proofs.iter().map(proof_indices).collect();
 
         let nullifying_key = signer.viewing_key().nullifying_key().to_u256();
         let npk_out = notes_out

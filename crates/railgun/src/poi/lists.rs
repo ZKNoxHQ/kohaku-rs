@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use crate::{
     common::sleep,
-    merkle_tree::{PoiMerkleProof, PoiMerkleTree, TOTAL_LEAVES, is_poi_empty_leaf},
+    merkle_tree::{MerkleProof, MerkleTreeError, PoiMerkleTree, TOTAL_LEAVES, is_poi_empty_leaf},
     poi::{
         client::{PoiClientError, PoiNodeClient},
         types::{BlindedCommitment, ListKey},
@@ -18,7 +18,7 @@ use crate::{
 /// One request, matching the node's cap on `ppoi_poi_merkletree_leaves`.
 const LEAF_PAGE: u64 = 100;
 /// Pages applied, validated and saved together. A save writes each touched tree whole (up to
-/// 65,536 leaves and every level above them), so saving after each page made the first copy of
+/// 65,536 leaves), so saving after each page made the first copy of
 /// a long list slow down as each tree filled. A failed batch costs at most this many pages again.
 const BATCH_PAGES: u64 = 20;
 /// Leaf requests in flight while a batch is fetched.
@@ -48,6 +48,8 @@ pub enum PoiSyncError {
     Client(#[from] PoiClientError),
     #[error("Database error: {0}")]
     Database(#[from] DatabaseError),
+    #[error("Merkle tree error: {0}")]
+    MerkleTree(#[from] MerkleTreeError),
     #[error("POI node rejected merkle roots for list {list_key}")]
     RootRejected { list_key: ListKey },
     /// The node owes a full page, or a shorter one that ends in the POI zero.
@@ -75,11 +77,7 @@ impl PoiLists {
             .is_some_and(|list| list.index.contains_key(&commitment))
     }
 
-    pub fn proof(
-        &self,
-        list_key: &ListKey,
-        commitment: BlindedCommitment,
-    ) -> Option<PoiMerkleProof> {
+    pub fn proof(&self, list_key: &ListKey, commitment: BlindedCommitment) -> Option<MerkleProof> {
         let list = self.lists.get(list_key)?;
         let (tree_number, leaf_index) = list.index.get(&commitment).copied()?;
         let tree = list.trees.get(&tree_number)?;
@@ -180,13 +178,11 @@ impl PoiLists {
                     break;
                 }
 
-                candidate.insert_range(page_start, real);
+                candidate.insert_range(page_start, real)?;
                 // Validate every page's roots, preserving the batched copy's trust boundary.
-                roots.extend(
-                    touched_trees(page_start, real_len)
-                        .iter()
-                        .map(|number| candidate.trees[number].root()),
-                );
+                for number in touched_trees(page_start, real_len) {
+                    roots.push(candidate.trees[&number].root()?);
+                }
                 cursor = page_start + real_len as u64;
                 pages_applied += 1;
                 if real_len < page.len() {
@@ -293,7 +289,7 @@ impl PoiList {
             let Some(state) = db.get_poi_tree(list_key, tree_number).await? else {
                 break;
             };
-            let tree = PoiMerkleTree::from_state(state);
+            let tree = PoiMerkleTree::from_state(state).map_err(DatabaseError::other)?;
             for (leaf_index, leaf) in tree.leaves().iter().copied().enumerate() {
                 index.insert(
                     BlindedCommitment::from(leaf),
@@ -314,7 +310,7 @@ impl PoiList {
         })
     }
 
-    fn insert_range(&mut self, start: u64, leaves: &[U256]) {
+    fn insert_range(&mut self, start: u64, leaves: &[U256]) -> Result<(), MerkleTreeError> {
         let mut offset = 0usize;
         while offset < leaves.len() {
             let global = start + offset as u64;
@@ -327,7 +323,7 @@ impl PoiList {
                 .trees
                 .entry(tree_number)
                 .or_insert_with(|| PoiMerkleTree::new(tree_number));
-            tree.insert_leaves(chunk, leaf_index as usize);
+            tree.insert_leaves(chunk, leaf_index as usize)?;
             for (i, leaf) in chunk.iter().copied().enumerate() {
                 self.index.insert(
                     BlindedCommitment::from(leaf),
@@ -336,6 +332,7 @@ impl PoiList {
             }
             offset += count;
         }
+        Ok(())
     }
 }
 
@@ -379,7 +376,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        merkle_tree::MerkleRoot,
+        merkle_tree::{MerkleRoot, PoiHasher},
         poi::types::TransactProofData,
         state::test_support::{
             backend::{StateBackend, StateWriteError},
@@ -454,8 +451,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, leaf)| {
-                    tree.insert_leaves(&[*leaf], i);
-                    tree.root()
+                    tree.insert_leaves(&[*leaf], i).unwrap();
+                    tree.root().unwrap()
                 })
                 .collect();
             *self.published.lock().unwrap() = Some(roots);
@@ -566,12 +563,17 @@ mod tests {
         assert!(lists.caught_up(&key));
         let commitment = BlindedCommitment::from(U256::from(2u8));
         let proof = lists.proof(&key, commitment).unwrap();
-        assert!(proof.verify());
+        assert!(proof.verify::<PoiHasher>());
 
         let reloaded = PoiLists::load(db.clone(), &[key.clone()]).await.unwrap();
         assert_eq!(reloaded.next_index(&key), 101);
         assert!(!reloaded.caught_up(&key));
-        assert!(reloaded.proof(&key, commitment).unwrap().verify());
+        assert!(
+            reloaded
+                .proof(&key, commitment)
+                .unwrap()
+                .verify::<PoiHasher>()
+        );
 
         leaves.push(U256::from(102u32));
         leaves.push(U256::from(103u32));
@@ -688,15 +690,15 @@ mod tests {
         assert_eq!(writes.load(Ordering::Relaxed), 4);
 
         let mut expected = PoiMerkleTree::new(0);
-        expected.insert_leaves(&all, 0);
+        expected.insert_leaves(&all, 0).unwrap();
         let reloaded = PoiLists::load(db, &[key.clone()]).await.unwrap();
         assert_eq!(reloaded.next_index(&key), 4_250);
         for leaf in [1u32, 2_100, 4_250] {
             let proof = reloaded
                 .proof(&key, BlindedCommitment::from(U256::from(leaf)))
                 .unwrap();
-            assert!(proof.verify());
-            assert_eq!(proof.root, expected.root());
+            assert!(proof.verify::<PoiHasher>());
+            assert_eq!(MerkleRoot::from(proof.root), expected.root().unwrap());
         }
 
         // Caught up: one more request and nothing to check.
@@ -727,7 +729,7 @@ mod tests {
             reloaded
                 .proof(&key, BlindedCommitment::from(U256::from(1_300u32)))
                 .unwrap()
-                .verify()
+                .verify::<PoiHasher>()
         );
     }
 
@@ -826,8 +828,8 @@ mod tests {
         assert!(!lists.contains(&key, new));
         assert!(lists.proof(&key, new).is_none());
         let proof = lists.proof(&key, replacement).unwrap();
-        assert_eq!(proof.element, U256::from(3));
-        assert!(proof.verify());
+        assert_eq!(proof.leaf, U256::from(3));
+        assert!(proof.verify::<PoiHasher>());
     }
     struct PausingWrites {
         inner: std::sync::Arc<MemoryState>,
@@ -907,12 +909,12 @@ mod tests {
         lists.sync(&node).await.unwrap();
         assert_eq!(lists.next_index(&key), u64::from(end));
         assert!(lists.caught_up(&key));
-        assert!(lists.proof(&key, new).unwrap().verify());
+        assert!(lists.proof(&key, new).unwrap().verify::<PoiHasher>());
         let reloaded = PoiLists::load(db, std::slice::from_ref(&key))
             .await
             .unwrap();
         assert_eq!(reloaded.next_index(&key), u64::from(end));
-        assert!(reloaded.proof(&key, new).unwrap().verify());
+        assert!(reloaded.proof(&key, new).unwrap().verify::<PoiHasher>());
     }
 
     #[tokio::test]
@@ -965,14 +967,14 @@ mod tests {
         let abandoned = BlindedCommitment::from(U256::from(101));
         assert_eq!(lists.next_index(&key), 100);
         assert!(!lists.caught_up(&key));
-        assert!(lists.proof(&key, old).unwrap().verify());
+        assert!(lists.proof(&key, old).unwrap().verify::<PoiHasher>());
         assert!(!lists.contains(&key, abandoned));
         assert!(lists.proof(&key, abandoned).is_none());
         let reloaded = PoiLists::load(db.clone(), std::slice::from_ref(&key))
             .await
             .unwrap();
         assert_eq!(reloaded.next_index(&key), 100);
-        assert!(reloaded.proof(&key, old).unwrap().verify());
+        assert!(reloaded.proof(&key, old).unwrap().verify::<PoiHasher>());
         assert!(!reloaded.contains(&key, abandoned));
 
         let mut replacement = leaves(450);
@@ -987,13 +989,23 @@ mod tests {
         assert!(lists.caught_up(&key));
         assert!(!lists.contains(&key, abandoned));
         let replacement = BlindedCommitment::from(U256::from(1_101));
-        assert!(lists.proof(&key, replacement).unwrap().verify());
+        assert!(
+            lists
+                .proof(&key, replacement)
+                .unwrap()
+                .verify::<PoiHasher>()
+        );
         let reloaded = PoiLists::load(db, std::slice::from_ref(&key))
             .await
             .unwrap();
         assert_eq!(reloaded.next_index(&key), 450);
         assert!(!reloaded.contains(&key, abandoned));
-        assert!(reloaded.proof(&key, replacement).unwrap().verify());
+        assert!(
+            reloaded
+                .proof(&key, replacement)
+                .unwrap()
+                .verify::<PoiHasher>()
+        );
     }
 
     #[tokio::test]

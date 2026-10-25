@@ -6,7 +6,7 @@ use crate::{
         indexed_account::IndexedAccountState, txid_indexer::TxidIndexerState,
         utxo_indexer::UtxoIndexerState,
     },
-    merkle_tree::{MerkleTreeState, PoiMerkleTreeState, PoiSyncState},
+    merkle_tree::{MerkleTreeState, PoiSyncState},
     poi::{provider::PoiProviderState, types::ListKey},
     state::{RailgunState, StateError},
 };
@@ -58,7 +58,7 @@ pub trait RailgunDB: crate::common::MaybeSend {
         &self,
         list_key: &ListKey,
         tree_number: u32,
-    ) -> Result<Option<PoiMerkleTreeState>, DatabaseError>;
+    ) -> Result<Option<MerkleTreeState>, DatabaseError>;
     async fn get_poi_sync(&self, list_key: &ListKey) -> Result<PoiSyncState, DatabaseError>;
 }
 
@@ -145,7 +145,7 @@ impl RailgunDB for RailgunState {
         &self,
         list_key: &ListKey,
         tree_number: u32,
-    ) -> Result<Option<PoiMerkleTreeState>, DatabaseError> {
+    ) -> Result<Option<MerkleTreeState>, DatabaseError> {
         let key = poi_tree_key(list_key, tree_number);
         let Some(bytes) = self.get(&key).await? else {
             return Ok(None);
@@ -218,7 +218,7 @@ pub(crate) async fn write_poi_snapshot(
     store: &RailgunState,
     list_key: &ListKey,
     next_index: u64,
-    trees: &[(u32, PoiMerkleTreeState)],
+    trees: &[(u32, MerkleTreeState)],
 ) -> Result<(), DatabaseError> {
     let mut writes = Vec::with_capacity(trees.len() + 1);
     for (number, tree) in trees {

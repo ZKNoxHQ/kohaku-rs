@@ -102,7 +102,9 @@ fn assert_unpublished(indexer: &UtxoIndexer, signer: &dyn RailgunSigner) {
 async fn assert_saved_once(db: &RailgunState, signer: &dyn RailgunSigner) {
     assert_eq!(db.get_utxo_indexer().await.unwrap().synced_block, 10);
     assert_eq!(
-        UtxoMerkleTree::from_state(db.get_utxo_tree(0).await.unwrap().unwrap()).leaves_len(),
+        UtxoMerkleTree::from_state(db.get_utxo_tree(0).await.unwrap().unwrap())
+            .unwrap()
+            .leaves_len(),
         1
     );
     let state = db.get_account(&signer.address()).await.unwrap();

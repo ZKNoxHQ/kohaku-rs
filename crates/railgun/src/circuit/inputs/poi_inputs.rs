@@ -11,7 +11,7 @@ use crate::{
     },
     merkle_tree::{
         MerkleRoot, MerkleTree, MerkleTreeError, TREE_DEPTH, TxidLeafHash, TxidMerkleTree,
-        UtxoTreeIndex,
+        UtxoTreeIndex, proof_indices,
     },
     poi::{note::PoiNote, types::ListKey},
 };
@@ -169,11 +169,12 @@ impl PoiCircuitInputs {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let poi_merkleroots: Vec<MerkleRoot> = poi_proofs.iter().map(|p| p.root).collect();
-        let poi_in_merkle_proof_indices =
-            poi_proofs.iter().map(|p| U256::from(p.indices)).collect();
-        let poi_in_merkle_proof_path_elements =
-            poi_proofs.iter().map(|p| p.elements.clone()).collect();
+        let poi_merkleroots: Vec<MerkleRoot> = poi_proofs.iter().map(|p| p.root.into()).collect();
+        let poi_in_merkle_proof_indices = poi_proofs.iter().map(|p| proof_indices(p)).collect();
+        let poi_in_merkle_proof_path_elements = poi_proofs
+            .iter()
+            .map(|p| p.sibling_paths().to_vec())
+            .collect();
 
         let randoms_in = in_notes
             .iter()
@@ -194,7 +195,7 @@ impl PoiCircuitInputs {
         let max_size = circuit_size(nullifiers.len(), out_commitments.len());
 
         Ok(PoiCircuitInputs {
-            railgun_txid_merkleroot_after_transaction: txid_proof.root,
+            railgun_txid_merkleroot_after_transaction: txid_proof.root.into(),
             poi_merkleroots: poi_merkleroots.clone(),
             poi_merkleroots_padded: pad_with_zero_value(poi_merkleroots, max_size),
             bound_params_hash,
@@ -211,8 +212,8 @@ impl PoiCircuitInputs {
             values_out: pad_with_zero(out_values.to_vec(), max_size),
             utxo_batch_global_start_position_out: U256::from(utxo_tree_out.global_index()),
             railgun_txid_if_has_unshield: txid_if_has_unshield,
-            railgun_txid_merkle_proof_indices: U256::from(txid_proof.indices),
-            railgun_txid_merkle_proof_path_elements: txid_proof.elements,
+            railgun_txid_merkle_proof_indices: proof_indices(&txid_proof),
+            railgun_txid_merkle_proof_path_elements: txid_proof.sibling_paths().to_vec(),
             poi_in_merkle_proof_indices: pad_with_zero(poi_in_merkle_proof_indices, max_size),
             poi_in_merkle_proof_path_elements: pad_merkle_proof_paths(
                 poi_in_merkle_proof_path_elements,

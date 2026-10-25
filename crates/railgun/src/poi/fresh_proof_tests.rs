@@ -183,7 +183,9 @@ async fn fresh_case(has_unshield: bool) {
     let (entry, input, output) = public_entry(has_unshield);
     let txid = entry.txid;
     let mut poi_tree = PoiMerkleTree::new(0);
-    poi_tree.insert_leaves(&[U256::from(1), U256::from(2), input.blinded_commitment], 0);
+    poi_tree
+        .insert_leaves(&[U256::from(1), U256::from(2), input.blinded_commitment], 0)
+        .unwrap();
     let store = RailgunState::default();
     write_poi_snapshot(&store, &entry.list_keys[0], 3, &[(0, poi_tree.state())])
         .await
@@ -199,13 +201,15 @@ async fn fresh_case(has_unshield: bool) {
     .unwrap();
     let mut txid_tree = TxidMerkleTree::new(3);
     let index = UtxoTreeIndex::included(output.tree_number, output.leaf_index);
-    txid_tree.insert_leaves(
-        &[
-            U256::from(1).into(),
-            TxidLeafHash::new(txid, input.tree_number, index),
-        ],
-        0,
-    );
+    txid_tree
+        .insert_leaves(
+            &[
+                U256::from(1).into(),
+                TxidLeafHash::new(txid, input.tree_number, index),
+            ],
+            0,
+        )
+        .unwrap();
     // Exercise the production cache membership -> inputs -> witness -> prover -> wire-data path.
     let mut proofs = provider
         .create_proof(
@@ -225,7 +229,7 @@ async fn fresh_case(has_unshield: bool) {
         data.blinded_commitments_out,
         vec![output.blinded_commitment.into()]
     );
-    assert_eq!(data.txid_merkleroot, txid_tree.root());
+    assert_eq!(data.txid_merkleroot, txid_tree.root().unwrap());
     assert_eq!(data.txid_merkleroot_index, 3 * 65_536 + 1);
     assert_eq!(
         data.railgun_txid_if_has_unshield,

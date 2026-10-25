@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use crate::{
     crypto::railgun_txid::Txid,
     indexer::syncer::{Operation, SyncerError, TxidSyncer},
-    merkle_tree::{TOTAL_LEAVES, TxidLeafHash, TxidMerkleTree, UtxoTreeIndex},
+    merkle_tree::{MerkleTreeError, TOTAL_LEAVES, TxidLeafHash, TxidMerkleTree, UtxoTreeIndex},
     poi::client::{PoiClientError, PoiNodeClient},
     railgun_database::{DatabaseError, RailgunDB, write_txid_snapshot},
     state::RailgunState,
@@ -47,6 +47,8 @@ pub enum TxidIndexerError {
     RootMismatch { tree_number: u32 },
     #[error("Database error: {0}")]
     DatabaseError(#[from] DatabaseError),
+    #[error("Merkle tree error: {0}")]
+    MerkleTree(#[from] MerkleTreeError),
 }
 
 impl TxidIndexer {
@@ -60,7 +62,7 @@ impl TxidIndexer {
         for number in inner.trees.clone() {
             let tree_state = db.get_txid_tree(number).await?;
             if let Some(tree_state) = tree_state {
-                txid_trees.insert(number, TxidMerkleTree::from_state(tree_state));
+                txid_trees.insert(number, TxidMerkleTree::from_state(tree_state)?);
             }
         }
 
@@ -130,11 +132,7 @@ impl TxidIndexer {
         // Validation and saving can fail or be cancelled. Keep the live indexer
         // unchanged until one fully validated snapshot is committed.
         let mut staged = Self {
-            trees: self
-                .trees
-                .iter()
-                .map(|(number, tree)| (*number, TxidMerkleTree::from_state(tree.state())))
-                .collect(),
+            trees: self.trees.clone(),
             inner: self.inner.clone(),
             watched: self.watched.clone(),
             db: self.db.clone(),
@@ -225,14 +223,14 @@ impl TxidIndexer {
             self.trees
                 .entry(tree_number)
                 .or_insert_with(|| TxidMerkleTree::new(tree_number))
-                .insert_leaves(&hashes, start as usize);
+                .insert_leaves(&hashes, start as usize)?;
         }
         info!("Drained {} operations", drain_count);
 
         info!("Validating TXID trees");
         for (tree_number, tree) in self.trees.iter() {
             let index = tree.leaves_len() as u32 - 1;
-            let merkleroot = tree.root();
+            let merkleroot = tree.root()?;
             let validated = poi_client
                 .validate_txid_merkleroot(*tree_number, index, merkleroot)
                 .await?;

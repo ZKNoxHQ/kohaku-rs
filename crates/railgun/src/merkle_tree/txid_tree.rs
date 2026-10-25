@@ -14,6 +14,7 @@ use crate::{
 ///
 /// TxID proofs are used to generate Merkle proofs for TxIDs when submitting to
 /// POI nodes.
+#[derive(Clone)]
 pub struct TxidMerkleTree {
     inner: MerkleTree,
 }
@@ -57,13 +58,13 @@ impl TxidMerkleTree {
         }
     }
 
-    pub fn from_state(state: MerkleTreeState) -> Self {
-        TxidMerkleTree {
-            inner: MerkleTree::from_state(state),
-        }
+    pub fn from_state(state: MerkleTreeState) -> Result<Self, MerkleTreeError> {
+        Ok(TxidMerkleTree {
+            inner: MerkleTree::from_state(state)?,
+        })
     }
 
-    pub fn root(&self) -> MerkleRoot {
+    pub fn root(&self) -> Result<MerkleRoot, MerkleTreeError> {
         self.inner.root()
     }
 
@@ -80,9 +81,13 @@ impl TxidMerkleTree {
     }
 
     /// Append leaves to the end of the tree and immediately rebuild.
-    pub(crate) fn insert_leaves(&mut self, leaves: &[TxidLeafHash], start_position: usize) {
+    pub(crate) fn insert_leaves(
+        &mut self,
+        leaves: &[TxidLeafHash],
+        start_position: usize,
+    ) -> Result<(), MerkleTreeError> {
         let u256s: Vec<U256> = leaves.iter().map(|l| (*l).into()).collect();
-        self.inner.insert_leaves(&u256s, start_position);
+        self.inner.insert_leaves(&u256s, start_position)
     }
 }
 
