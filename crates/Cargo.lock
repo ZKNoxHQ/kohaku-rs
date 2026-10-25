@@ -5282,8 +5282,11 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "kohaku-railgun",
  "kohaku-tornadocash",
  "kohaku-userop-kit",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

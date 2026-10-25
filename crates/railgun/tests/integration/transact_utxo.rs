@@ -1,19 +1,14 @@
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
 use alloy::{
-    network::Ethereum,
     primitives::{U256, address},
     providers::{Provider, ProviderBuilder},
-    signers::local::PrivateKeySigner,
     sol,
 };
-use kohaku_fork_kit::anvil::AnvilBuilder;
+use kohaku_fork_kit::railgun::deploy_railgun;
 use kohaku_railgun::{
-    account::signer::RailgunSigner,
-    builder::RailgunBuilder,
-    caip::AssetId,
-    chain_config::ChainConfig,
-    indexer::syncer::{ChainedSyncer, RpcSyncer, SubsquidSyncer},
+    account::signer::RailgunSigner, builder::RailgunBuilder, caip::AssetId,
+    indexer::syncer::RpcSyncer,
 };
 use rand::random;
 use tracing::info;
@@ -37,7 +32,6 @@ sol! {
 ///
 /// This integration test DOES NOT verify any TXID or POI functionality.
 #[tokio::test]
-#[serial_test::serial]
 #[ignore]
 async fn test_transact_utxo() {
     tracing_subscriber::fmt()
@@ -46,40 +40,18 @@ async fn test_transact_utxo() {
         .try_init()
         .ok();
 
-    let chain = ChainConfig::sepolia();
+    info!("Deploying railgun");
+    let provider = ProviderBuilder::new().connect_anvil_with_wallet().erased();
+    let chain = deploy_railgun(provider.clone()).await.unwrap();
     let weth = AssetId::Erc20(chain.wrapped_base_token);
-
-    info!("Setting up alloy provider");
-    let signer = PrivateKeySigner::from_str(
-        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-    )
-    .unwrap();
-
-    let fork_block = 10822990;
-    let fork_url = std::env::var("RPC_URL_SEPOLIA").expect("RPC_URL_SEPOLIA must be set");
-
-    info!("Setting up alloy provider");
-    let _anvil = AnvilBuilder::new()
-        .fork_url(&fork_url)
-        .fork_block(fork_block)
-        .spawn()
-        .await;
-
-    let provider = ProviderBuilder::new()
-        .network::<Ethereum>()
-        .wallet(signer)
-        .connect("http://localhost:8545")
-        .await
-        .unwrap()
-        .erased();
 
     let weth_contract = WETH::new(chain.wrapped_base_token, provider.clone());
 
     info!("Setting up railgun");
     let syncer = Arc::new(
-        ChainedSyncer::new()
-            .then(SubsquidSyncer::new(&chain.subsquid_endpoint).with_latest_block(fork_block))
-            .then(RpcSyncer::new(chain.clone(), provider.clone()).with_batch_size(1000)),
+        RpcSyncer::new(chain.clone(), provider.clone())
+            .with_batch_size(1000)
+            .with_batch_delay(std::time::Duration::ZERO),
     );
     let mut railgun = RailgunBuilder::new(chain.clone(), provider.clone())
         .with_utxo_syncer(syncer)

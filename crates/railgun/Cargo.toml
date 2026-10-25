@@ -79,7 +79,7 @@ wasmer = { workspace = true, features = ["js-default"] }
 cfg_aliases = { workspace = true }
 
 [dev-dependencies]
-alloy = { workspace = true, default-features = true }
+alloy = { workspace = true, default-features = true, features = ["provider-anvil-node"] }
 insta = { workspace = true }
 kohaku-railgun = { path = ".", features = ["testing"] }
 serial_test = { workspace = true }

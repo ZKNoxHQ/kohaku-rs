@@ -1,0 +1,2486 @@
+{
+  "abi": [
+    {
+      "type": "function",
+      "name": "ZERO_VALUE",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "addToBlocklist",
+      "inputs": [
+        {
+          "name": "_tokens",
+          "type": "address[]",
+          "internalType": "address[]"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "addVector",
+      "inputs": [
+        {
+          "name": "vector",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "changeFee",
+      "inputs": [
+        {
+          "name": "_shieldFee",
+          "type": "uint120",
+          "internalType": "uint120"
+        },
+        {
+          "name": "_unshieldFee",
+          "type": "uint120",
+          "internalType": "uint120"
+        },
+        {
+          "name": "_nftFee",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "changeTreasury",
+      "inputs": [
+        {
+          "name": "_treasury",
+          "type": "address",
+          "internalType": "address payable"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "checkSafetyVectors",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "getFee",
+      "inputs": [
+        {
+          "name": "_amount",
+          "type": "uint136",
+          "internalType": "uint136"
+        },
+        {
+          "name": "_isInclusive",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "_feeBP",
+          "type": "uint120",
+          "internalType": "uint120"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint120",
+          "internalType": "uint120"
+        },
+        {
+          "name": "",
+          "type": "uint120",
+          "internalType": "uint120"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "getInsertionTreeNumberAndStartingIndex",
+      "inputs": [
+        {
+          "name": "_newCommitments",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getTokenID",
+      "inputs": [
+        {
+          "name": "_tokenData",
+          "type": "tuple",
+          "internalType": "struct TokenData",
+          "components": [
+            {
+              "name": "tokenType",
+              "type": "uint8",
+              "internalType": "enum TokenType"
+            },
+            {
+              "name": "tokenAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "tokenSubID",
+              "type": "uint256",
+              "internalType": "uint256"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "getVerificationKey",
+      "inputs": [
+        {
+          "name": "_nullifiers",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "_commitments",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "tuple",
+          "internalType": "struct VerifyingKey",
+          "components": [
+            {
+              "name": "artifactsIPFSHash",
+              "type": "string",
+              "internalType": "string"
+            },
+            {
+              "name": "alpha1",
+              "type": "tuple",
+              "internalType": "struct G1Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "beta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "gamma2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "delta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "ic",
+              "type": "tuple[]",
+              "internalType": "struct G1Point[]",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "hashBoundParams",
+      "inputs": [
+        {
+          "name": "_boundParams",
+          "type": "tuple",
+          "internalType": "struct BoundParams",
+          "components": [
+            {
+              "name": "treeNumber",
+              "type": "uint16",
+              "internalType": "uint16"
+            },
+            {
+              "name": "minGasPrice",
+              "type": "uint72",
+              "internalType": "uint72"
+            },
+            {
+              "name": "unshield",
+              "type": "uint8",
+              "internalType": "enum UnshieldType"
+            },
+            {
+              "name": "chainID",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "adaptContract",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "adaptParams",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "commitmentCiphertext",
+              "type": "tuple[]",
+              "internalType": "struct CommitmentCiphertext[]",
+              "components": [
+                {
+                  "name": "ciphertext",
+                  "type": "bytes32[4]",
+                  "internalType": "bytes32[4]"
+                },
+                {
+                  "name": "blindedSenderViewingKey",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "blindedReceiverViewingKey",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "annotationData",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                },
+                {
+                  "name": "memo",
+                  "type": "bytes",
+                  "internalType": "bytes"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "hashCommitment",
+      "inputs": [
+        {
+          "name": "_commitmentPreimage",
+          "type": "tuple",
+          "internalType": "struct CommitmentPreimage",
+          "components": [
+            {
+              "name": "npk",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "token",
+              "type": "tuple",
+              "internalType": "struct TokenData",
+              "components": [
+                {
+                  "name": "tokenType",
+                  "type": "uint8",
+                  "internalType": "enum TokenType"
+                },
+                {
+                  "name": "tokenAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "tokenSubID",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "value",
+              "type": "uint120",
+              "internalType": "uint120"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "hashLeftRight",
+      "inputs": [
+        {
+          "name": "_left",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "_right",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "initializeRailgunLogic",
+      "inputs": [
+        {
+          "name": "_treasury",
+          "type": "address",
+          "internalType": "address payable"
+        },
+        {
+          "name": "_shieldFee",
+          "type": "uint120",
+          "internalType": "uint120"
+        },
+        {
+          "name": "_unshieldFee",
+          "type": "uint120",
+          "internalType": "uint120"
+        },
+        {
+          "name": "_nftFee",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "_owner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "lastEventBlock",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "merkleRoot",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "nextLeafIndex",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "nftFee",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "nullifiers",
+      "inputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "owner",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "removeFromBlocklist",
+      "inputs": [
+        {
+          "name": "_tokens",
+          "type": "address[]",
+          "internalType": "address[]"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "removeVector",
+      "inputs": [
+        {
+          "name": "vector",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "renounceOwnership",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "rootHistory",
+      "inputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "setVerificationKey",
+      "inputs": [
+        {
+          "name": "_nullifiers",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "_commitments",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "_verifyingKey",
+          "type": "tuple",
+          "internalType": "struct VerifyingKey",
+          "components": [
+            {
+              "name": "artifactsIPFSHash",
+              "type": "string",
+              "internalType": "string"
+            },
+            {
+              "name": "alpha1",
+              "type": "tuple",
+              "internalType": "struct G1Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "beta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "gamma2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "delta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "ic",
+              "type": "tuple[]",
+              "internalType": "struct G1Point[]",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "shield",
+      "inputs": [
+        {
+          "name": "_shieldRequests",
+          "type": "tuple[]",
+          "internalType": "struct ShieldRequest[]",
+          "components": [
+            {
+              "name": "preimage",
+              "type": "tuple",
+              "internalType": "struct CommitmentPreimage",
+              "components": [
+                {
+                  "name": "npk",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "token",
+                  "type": "tuple",
+                  "internalType": "struct TokenData",
+                  "components": [
+                    {
+                      "name": "tokenType",
+                      "type": "uint8",
+                      "internalType": "enum TokenType"
+                    },
+                    {
+                      "name": "tokenAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "tokenSubID",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "value",
+                  "type": "uint120",
+                  "internalType": "uint120"
+                }
+              ]
+            },
+            {
+              "name": "ciphertext",
+              "type": "tuple",
+              "internalType": "struct ShieldCiphertext",
+              "components": [
+                {
+                  "name": "encryptedBundle",
+                  "type": "bytes32[3]",
+                  "internalType": "bytes32[3]"
+                },
+                {
+                  "name": "shieldKey",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "shieldFee",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint120",
+          "internalType": "uint120"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "snarkSafetyVector",
+      "inputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "sumCommitments",
+      "inputs": [
+        {
+          "name": "_transactions",
+          "type": "tuple[]",
+          "internalType": "struct Transaction[]",
+          "components": [
+            {
+              "name": "proof",
+              "type": "tuple",
+              "internalType": "struct SnarkProof",
+              "components": [
+                {
+                  "name": "a",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "b",
+                  "type": "tuple",
+                  "internalType": "struct G2Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    }
+                  ]
+                },
+                {
+                  "name": "c",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "merkleRoot",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "nullifiers",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "commitments",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "boundParams",
+              "type": "tuple",
+              "internalType": "struct BoundParams",
+              "components": [
+                {
+                  "name": "treeNumber",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "minGasPrice",
+                  "type": "uint72",
+                  "internalType": "uint72"
+                },
+                {
+                  "name": "unshield",
+                  "type": "uint8",
+                  "internalType": "enum UnshieldType"
+                },
+                {
+                  "name": "chainID",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "adaptContract",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "adaptParams",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "commitmentCiphertext",
+                  "type": "tuple[]",
+                  "internalType": "struct CommitmentCiphertext[]",
+                  "components": [
+                    {
+                      "name": "ciphertext",
+                      "type": "bytes32[4]",
+                      "internalType": "bytes32[4]"
+                    },
+                    {
+                      "name": "blindedSenderViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "blindedReceiverViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "annotationData",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    },
+                    {
+                      "name": "memo",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "unshieldPreimage",
+              "type": "tuple",
+              "internalType": "struct CommitmentPreimage",
+              "components": [
+                {
+                  "name": "npk",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "token",
+                  "type": "tuple",
+                  "internalType": "struct TokenData",
+                  "components": [
+                    {
+                      "name": "tokenType",
+                      "type": "uint8",
+                      "internalType": "enum TokenType"
+                    },
+                    {
+                      "name": "tokenAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "tokenSubID",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "value",
+                  "type": "uint120",
+                  "internalType": "uint120"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "tokenBlocklist",
+      "inputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "tokenIDMapping",
+      "inputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tokenType",
+          "type": "uint8",
+          "internalType": "enum TokenType"
+        },
+        {
+          "name": "tokenAddress",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "tokenSubID",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "transact",
+      "inputs": [
+        {
+          "name": "_transactions",
+          "type": "tuple[]",
+          "internalType": "struct Transaction[]",
+          "components": [
+            {
+              "name": "proof",
+              "type": "tuple",
+              "internalType": "struct SnarkProof",
+              "components": [
+                {
+                  "name": "a",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "b",
+                  "type": "tuple",
+                  "internalType": "struct G2Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    }
+                  ]
+                },
+                {
+                  "name": "c",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "merkleRoot",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "nullifiers",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "commitments",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "boundParams",
+              "type": "tuple",
+              "internalType": "struct BoundParams",
+              "components": [
+                {
+                  "name": "treeNumber",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "minGasPrice",
+                  "type": "uint72",
+                  "internalType": "uint72"
+                },
+                {
+                  "name": "unshield",
+                  "type": "uint8",
+                  "internalType": "enum UnshieldType"
+                },
+                {
+                  "name": "chainID",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "adaptContract",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "adaptParams",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "commitmentCiphertext",
+                  "type": "tuple[]",
+                  "internalType": "struct CommitmentCiphertext[]",
+                  "components": [
+                    {
+                      "name": "ciphertext",
+                      "type": "bytes32[4]",
+                      "internalType": "bytes32[4]"
+                    },
+                    {
+                      "name": "blindedSenderViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "blindedReceiverViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "annotationData",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    },
+                    {
+                      "name": "memo",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "unshieldPreimage",
+              "type": "tuple",
+              "internalType": "struct CommitmentPreimage",
+              "components": [
+                {
+                  "name": "npk",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "token",
+                  "type": "tuple",
+                  "internalType": "struct TokenData",
+                  "components": [
+                    {
+                      "name": "tokenType",
+                      "type": "uint8",
+                      "internalType": "enum TokenType"
+                    },
+                    {
+                      "name": "tokenAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "tokenSubID",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "value",
+                  "type": "uint120",
+                  "internalType": "uint120"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "transferOwnership",
+      "inputs": [
+        {
+          "name": "newOwner",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "treasury",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address payable"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "treeNumber",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "unshieldFee",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint120",
+          "internalType": "uint120"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "validateCommitmentPreimage",
+      "inputs": [
+        {
+          "name": "_note",
+          "type": "tuple",
+          "internalType": "struct CommitmentPreimage",
+          "components": [
+            {
+              "name": "npk",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "token",
+              "type": "tuple",
+              "internalType": "struct TokenData",
+              "components": [
+                {
+                  "name": "tokenType",
+                  "type": "uint8",
+                  "internalType": "enum TokenType"
+                },
+                {
+                  "name": "tokenAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "tokenSubID",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "value",
+              "type": "uint120",
+              "internalType": "uint120"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "",
+          "type": "string",
+          "internalType": "string"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "validateTransaction",
+      "inputs": [
+        {
+          "name": "_transaction",
+          "type": "tuple",
+          "internalType": "struct Transaction",
+          "components": [
+            {
+              "name": "proof",
+              "type": "tuple",
+              "internalType": "struct SnarkProof",
+              "components": [
+                {
+                  "name": "a",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "b",
+                  "type": "tuple",
+                  "internalType": "struct G2Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    }
+                  ]
+                },
+                {
+                  "name": "c",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "merkleRoot",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "nullifiers",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "commitments",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "boundParams",
+              "type": "tuple",
+              "internalType": "struct BoundParams",
+              "components": [
+                {
+                  "name": "treeNumber",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "minGasPrice",
+                  "type": "uint72",
+                  "internalType": "uint72"
+                },
+                {
+                  "name": "unshield",
+                  "type": "uint8",
+                  "internalType": "enum UnshieldType"
+                },
+                {
+                  "name": "chainID",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "adaptContract",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "adaptParams",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "commitmentCiphertext",
+                  "type": "tuple[]",
+                  "internalType": "struct CommitmentCiphertext[]",
+                  "components": [
+                    {
+                      "name": "ciphertext",
+                      "type": "bytes32[4]",
+                      "internalType": "bytes32[4]"
+                    },
+                    {
+                      "name": "blindedSenderViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "blindedReceiverViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "annotationData",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    },
+                    {
+                      "name": "memo",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "unshieldPreimage",
+              "type": "tuple",
+              "internalType": "struct CommitmentPreimage",
+              "components": [
+                {
+                  "name": "npk",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "token",
+                  "type": "tuple",
+                  "internalType": "struct TokenData",
+                  "components": [
+                    {
+                      "name": "tokenType",
+                      "type": "uint8",
+                      "internalType": "enum TokenType"
+                    },
+                    {
+                      "name": "tokenAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "tokenSubID",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "value",
+                  "type": "uint120",
+                  "internalType": "uint120"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "",
+          "type": "string",
+          "internalType": "string"
+        },
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "verify",
+      "inputs": [
+        {
+          "name": "_transaction",
+          "type": "tuple",
+          "internalType": "struct Transaction",
+          "components": [
+            {
+              "name": "proof",
+              "type": "tuple",
+              "internalType": "struct SnarkProof",
+              "components": [
+                {
+                  "name": "a",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "b",
+                  "type": "tuple",
+                  "internalType": "struct G2Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256[2]",
+                      "internalType": "uint256[2]"
+                    }
+                  ]
+                },
+                {
+                  "name": "c",
+                  "type": "tuple",
+                  "internalType": "struct G1Point",
+                  "components": [
+                    {
+                      "name": "x",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    },
+                    {
+                      "name": "y",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "merkleRoot",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "nullifiers",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "commitments",
+              "type": "bytes32[]",
+              "internalType": "bytes32[]"
+            },
+            {
+              "name": "boundParams",
+              "type": "tuple",
+              "internalType": "struct BoundParams",
+              "components": [
+                {
+                  "name": "treeNumber",
+                  "type": "uint16",
+                  "internalType": "uint16"
+                },
+                {
+                  "name": "minGasPrice",
+                  "type": "uint72",
+                  "internalType": "uint72"
+                },
+                {
+                  "name": "unshield",
+                  "type": "uint8",
+                  "internalType": "enum UnshieldType"
+                },
+                {
+                  "name": "chainID",
+                  "type": "uint64",
+                  "internalType": "uint64"
+                },
+                {
+                  "name": "adaptContract",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "adaptParams",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "commitmentCiphertext",
+                  "type": "tuple[]",
+                  "internalType": "struct CommitmentCiphertext[]",
+                  "components": [
+                    {
+                      "name": "ciphertext",
+                      "type": "bytes32[4]",
+                      "internalType": "bytes32[4]"
+                    },
+                    {
+                      "name": "blindedSenderViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "blindedReceiverViewingKey",
+                      "type": "bytes32",
+                      "internalType": "bytes32"
+                    },
+                    {
+                      "name": "annotationData",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    },
+                    {
+                      "name": "memo",
+                      "type": "bytes",
+                      "internalType": "bytes"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "unshieldPreimage",
+              "type": "tuple",
+              "internalType": "struct CommitmentPreimage",
+              "components": [
+                {
+                  "name": "npk",
+                  "type": "bytes32",
+                  "internalType": "bytes32"
+                },
+                {
+                  "name": "token",
+                  "type": "tuple",
+                  "internalType": "struct TokenData",
+                  "components": [
+                    {
+                      "name": "tokenType",
+                      "type": "uint8",
+                      "internalType": "enum TokenType"
+                    },
+                    {
+                      "name": "tokenAddress",
+                      "type": "address",
+                      "internalType": "address"
+                    },
+                    {
+                      "name": "tokenSubID",
+                      "type": "uint256",
+                      "internalType": "uint256"
+                    }
+                  ]
+                },
+                {
+                  "name": "value",
+                  "type": "uint120",
+                  "internalType": "uint120"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "verifyProof",
+      "inputs": [
+        {
+          "name": "_verifyingKey",
+          "type": "tuple",
+          "internalType": "struct VerifyingKey",
+          "components": [
+            {
+              "name": "artifactsIPFSHash",
+              "type": "string",
+              "internalType": "string"
+            },
+            {
+              "name": "alpha1",
+              "type": "tuple",
+              "internalType": "struct G1Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "beta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "gamma2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "delta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "ic",
+              "type": "tuple[]",
+              "internalType": "struct G1Point[]",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "_proof",
+          "type": "tuple",
+          "internalType": "struct SnarkProof",
+          "components": [
+            {
+              "name": "a",
+              "type": "tuple",
+              "internalType": "struct G1Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "b",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "c",
+              "type": "tuple",
+              "internalType": "struct G1Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "_inputs",
+          "type": "uint256[]",
+          "internalType": "uint256[]"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool",
+          "internalType": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "zeros",
+      "inputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "event",
+      "name": "Action",
+      "inputs": [
+        {
+          "name": "caller",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "txconfigs",
+          "type": "tuple[]",
+          "indexed": false,
+          "internalType": "struct TXConfig[]",
+          "components": [
+            {
+              "name": "nullifiersCount",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "commitmentsCount",
+              "type": "uint32",
+              "internalType": "uint32"
+            },
+            {
+              "name": "hasUnshield",
+              "type": "bool",
+              "internalType": "bool"
+            },
+            {
+              "name": "boundParamsHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            }
+          ]
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "AddToBlocklist",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "FeeChange",
+      "inputs": [
+        {
+          "name": "shieldFee",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "unshieldFee",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "nftFee",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Initialized",
+      "inputs": [
+        {
+          "name": "version",
+          "type": "uint8",
+          "indexed": false,
+          "internalType": "uint8"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Nullified",
+      "inputs": [
+        {
+          "name": "treeNumber",
+          "type": "uint16",
+          "indexed": false,
+          "internalType": "uint16"
+        },
+        {
+          "name": "nullifier",
+          "type": "bytes32[]",
+          "indexed": false,
+          "internalType": "bytes32[]"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "OwnershipTransferred",
+      "inputs": [
+        {
+          "name": "previousOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "newOwner",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "RemoveFromBlocklist",
+      "inputs": [
+        {
+          "name": "token",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Shield",
+      "inputs": [
+        {
+          "name": "treeNumber",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "startPosition",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "commitments",
+          "type": "tuple[]",
+          "indexed": false,
+          "internalType": "struct CommitmentPreimage[]",
+          "components": [
+            {
+              "name": "npk",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "token",
+              "type": "tuple",
+              "internalType": "struct TokenData",
+              "components": [
+                {
+                  "name": "tokenType",
+                  "type": "uint8",
+                  "internalType": "enum TokenType"
+                },
+                {
+                  "name": "tokenAddress",
+                  "type": "address",
+                  "internalType": "address"
+                },
+                {
+                  "name": "tokenSubID",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "value",
+              "type": "uint120",
+              "internalType": "uint120"
+            }
+          ]
+        },
+        {
+          "name": "shieldCiphertext",
+          "type": "tuple[]",
+          "indexed": false,
+          "internalType": "struct ShieldCiphertext[]",
+          "components": [
+            {
+              "name": "encryptedBundle",
+              "type": "bytes32[3]",
+              "internalType": "bytes32[3]"
+            },
+            {
+              "name": "shieldKey",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            }
+          ]
+        },
+        {
+          "name": "fees",
+          "type": "uint256[]",
+          "indexed": false,
+          "internalType": "uint256[]"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Transact",
+      "inputs": [
+        {
+          "name": "treeNumber",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "startPosition",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "hash",
+          "type": "bytes32[]",
+          "indexed": false,
+          "internalType": "bytes32[]"
+        },
+        {
+          "name": "ciphertext",
+          "type": "tuple[]",
+          "indexed": false,
+          "internalType": "struct CommitmentCiphertext[]",
+          "components": [
+            {
+              "name": "ciphertext",
+              "type": "bytes32[4]",
+              "internalType": "bytes32[4]"
+            },
+            {
+              "name": "blindedSenderViewingKey",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "blindedReceiverViewingKey",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "annotationData",
+              "type": "bytes",
+              "internalType": "bytes"
+            },
+            {
+              "name": "memo",
+              "type": "bytes",
+              "internalType": "bytes"
+            }
+          ]
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "TreasuryChange",
+      "inputs": [
+        {
+          "name": "treasury",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "Unshield",
+      "inputs": [
+        {
+          "name": "to",
+          "type": "address",
+          "indexed": false,
+          "internalType": "address"
+        },
+        {
+          "name": "token",
+          "type": "tuple",
+          "indexed": false,
+          "internalType": "struct TokenData",
+          "components": [
+            {
+              "name": "tokenType",
+              "type": "uint8",
+              "internalType": "enum TokenType"
+            },
+            {
+              "name": "tokenAddress",
+              "type": "address",
+              "internalType": "address"
+            },
+            {
+              "name": "tokenSubID",
+              "type": "uint256",
+              "internalType": "uint256"
+            }
+          ]
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "fee",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "VerifyingKeySet",
+      "inputs": [
+        {
+          "name": "nullifiers",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "commitments",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "verifyingKey",
+          "type": "tuple",
+          "indexed": false,
+          "internalType": "struct VerifyingKey",
+          "components": [
+            {
+              "name": "artifactsIPFSHash",
+              "type": "string",
+              "internalType": "string"
+            },
+            {
+              "name": "alpha1",
+              "type": "tuple",
+              "internalType": "struct G1Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            },
+            {
+              "name": "beta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "gamma2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "delta2",
+              "type": "tuple",
+              "internalType": "struct G2Point",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256[2]",
+                  "internalType": "uint256[2]"
+                }
+              ]
+            },
+            {
+              "name": "ic",
+              "type": "tuple[]",
+              "internalType": "struct G1Point[]",
+              "components": [
+                {
+                  "name": "x",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                },
+                {
+                  "name": "y",
+                  "type": "uint256",
+                  "internalType": "uint256"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "anonymous": false
+    }
+  ],
+  "bytecode": {
+    "object": "0x608060405234801561001057600080fd5b50615dad80620000216000396000f3fe608060405234801561001057600080fd5b50600436106102535760003560e01c806371c5345511610146578063c718dbda116100c3578063e829558811610087578063e8295588146105d4578063ec732959146105e7578063ee990783146105ef578063f19ea90314610619578063f2fde38b14610647578063f71a55f81461065a57600080fd5b8063c718dbda14610564578063cc1f73fd14610592578063cd3efe06146105a5578063d8ae136a146105ae578063dc7c9a1f146105c157600080fd5b806392d3c7a41161010a57806392d3c7a4146104ce578063a33952a9146104e1578063ab63e69c146104f4578063b14f2a3914610507578063b8ceaef21461051a57600080fd5b806371c534551461045e5780637b12ae8314610471578063815b534f146104915780638da5cb5b146104b45780639071adc0146104c557600080fd5b80632ebfe12a116101d4578063617e1b1711610198578063617e1b17146103ee57806361d027b31461040f578063665033151461043a5780636cefafaa14610443578063715018a61461045657600080fd5b80632ebfe12a1461036f5780632ec0f3591461038257806338bf282e1461039557806343c88730146103a857806359bb6199146103db57600080fd5b80630c9c0c8d1161021b5780630c9c0c8d146102d6578063129458f4146102fe578063174768911461033157806328f89c3a146103535780632eb4a7ab1461036657600080fd5b806301c3779014610258578063044a40c314610288578063053ed12a1461029d5780630804a4ee146102b75780630be4f422146102bf575b600080fd5b60fa5461026b906001600160781b031681565b6040516001600160781b0390911681526020015b60405180910390f35b61029b6102963660046140f8565b61066d565b005b60fa5461026b90600160781b90046001600160781b031681565b61029b610ab7565b6102c860665481565b60405190815260200161027f565b6102e96102e436600461416d565b610b43565b6040805192835260208301919091520161027f565b61032161030c36600461416d565b60fc6020526000908152604090205460ff1681565b604051901515815260200161027f565b61034461033f366004614186565b610b8d565b60405161027f93929190614211565b6102c861036136600461423c565b611018565b6102c860675481565b61032161037d3660046145c5565b611063565b61029b6103903660046146d8565b611086565b6102c86103a336600461472f565b6110f6565b6103bb6103b636600461477b565b611188565b604080516001600160781b0393841681529290911660208301520161027f565b6102c86103e9366004614819565b611219565b6104016103fc36600461484e565b61128e565b60405161027f929190614860565b60f954610422906001600160a01b031681565b6040516001600160a01b03909116815260200161027f565b6102c860695481565b61029b61045136600461416d565b6113ca565b61029b6113ed565b6102c861046c3660046148f6565b611401565b61048461047f36600461472f565b6114b5565b60405161027f919061497e565b61032161049f366004614a5a565b60956020526000908152604090205460ff1681565b6033546001600160a01b0316610422565b6102c860fb5481565b6102c86104dc366004614a77565b61177a565b61029b6104ef366004614a93565b6117c6565b61029b610502366004614819565b6119a2565b61029b610515366004614a5a565b611ac2565b61055561052836600461416d565b60fd602052600090815260409020805460019091015460ff82169161010090046001600160a01b03169083565b60405161027f93929190614b2b565b61032161057236600461472f565b608a60209081526000928352604080842090915290825290205460ff1681565b61029b6105a0366004614b55565b611b33565b6102c860fe5481565b61029b6105bc366004614819565b611ce6565b61029b6105cf36600461416d565b6121ec565b6102c86105e236600461416d565b61220c565b6102c8612223565b6106026105fd366004614186565b61225e565b60408051921515835260208301919091520161027f565b61032161062736600461472f565b606560209081526000928352604080842090915290825290205460ff1681565b61029b610655366004614a5a565b612781565b61029b610668366004614819565b6127f7565b6000816001600160401b0381111561068757610687614276565b6040519080825280602002602001820160405280156106b0578160200160208202803683370190505b5090506000826001600160401b038111156106cd576106cd614276565b60405190808252806020026020018201604052801561070657816020015b6106f3613f78565b8152602001906001900390816106eb5790505b5090506000836001600160401b0381111561072357610723614276565b60405190808252806020026020018201604052801561075c57816020015b610749613fb1565b8152602001906001900390816107415790505b5090506000846001600160401b0381111561077957610779614276565b6040519080825280602002602001820160405280156107a2578160200160208202803683370190505b50604080516000808252602082019092529192507f29696e3cb1956aca85bbcae445e3ed9bb933a4b7328445f65e872e49af7229ea913391610813565b6040805160808101825260008082526020808301829052928201819052606082015282526000199092019101816107df5790505b50604051610822929190614b91565b60405180910390a160005b85811015610a4f5760008061085c89898581811061084d5761084d614c10565b9050610120020160000161128e565b9150915081816040516020016108729190614c26565b604051602081830303815290604052906108a85760405162461bcd60e51b815260040161089f9190614c62565b60405180910390fd5b50609560008a8a868181106108bf576108bf614c10565b6108d9926060610120909202019081019150604001614a5a565b6001600160a01b0316815260208101919091526040016000205460ff16156109515760405162461bcd60e51b815260206004820152602560248201527f5261696c67756e536d61727457616c6c65743a20556e737570706f72746564206044820152642a37b5b2b760d91b606482015260840161089f565b61097589898581811061096657610966614c10565b9050610120020160000161291a565b87858151811061098757610987614c10565b602002602001018686815181106109a0576109a0614c10565b602002602001018281525082905250506109d28684815181106109c5576109c5614c10565b6020026020010151611401565b8784815181106109e4576109e4614c10565b602002602001018181525050888884818110610a0257610a02614c10565b9050610120020160a001803603810190610a1c9190614c75565b858481518110610a2e57610a2e614c10565b60200260200101819052505050600181610a489190614d17565b905061082d565b50600080610a5d8551610b43565b915091507f3a5b9dc26075a3801a6ddccf95fec485bb7500a91b44cec1add984c21ee6db3b8282878787604051610a98959493929190614dfa565b60405180910390a1610aa986612da1565b50504360fe55505050505050565b7f8dea8703c3cf94703383ce38a9c894669dccd4ca8e65ddb43267aa0248711450805460ff1916600117905533600090815260fc602052604090205480610b405760405162461bcd60e51b815260206004820152601c60248201527f5261696c67756e4c6f6769633a20556e7361666520766563746f727300000000604482015260640161089f565b50565b600080610b5260106002614f82565b83606654610b609190614d17565b1115610b7e57606954610b74906001614d17565b9360009350915050565b60695460665491509150915091565b6000606081610ba0610160850185614f8e565b610bb1906040810190602001614fc7565b68ffffffffffffffffff163a1015610bf757505060408051808201909152601181527047617320707269636520746f6f206c6f7760781b60208201526000915081611011565b6000610c07610160860186614f8e565b610c189060a0810190608001614a5a565b6001600160a01b031614158015610c56575033610c39610160860186614f8e565b610c4a9060a0810190608001614a5a565b6001600160a01b031614155b15610c9b5750506040805180820190915260208082527f496e76616c696420416461707420436f6e74726163742061732053656e646572908201526000915081611011565b46610caa610160860186614f8e565b610cbb906080810190606001614ff9565b6001600160401b031614610cfc57505060408051808201909152601081526f086d0c2d2dc928840dad2e6dac2e8c6d60831b60208201526000915081611011565b608a6000610d0e610160870187614f8e565b610d1c906020810190615026565b61ffff16815260208082019290925260409081016000908120610100880135825290925290205460ff16610d80575050604080518082019091526013815272125b9d985b1a590813595c9adb1948149bdbdd606a1b60208201526000915081611011565b6000610d90610160860186614f8e565b610da1906060810190604001615041565b6002811115610db257610db2614af7565b14610f4b576001610dc761014086018661505e565b610dd29291506150a7565b610de0610160860186614f8e565b610dee9060c081019061505e565b905014610e1d576000604051806060016040528060248152602001615d54602491396000925092509250611011565b60006002610e2f610160870187614f8e565b610e40906060810190604001615041565b6002811115610e5157610e51614af7565b03610ead576040805160608101909152338152610ea69060208101610e7f3689900389016101a08a01614a77565b8152602001610e9661022089016102008a016150ba565b6001600160781b03169052611401565b9050610ec6565b610ec361046c36879003870161018088016148f6565b90505b610ed461014086018661505e565b6001610ee461014089018961505e565b610eef9291506150a7565b818110610efe57610efe614c10565b905060200201358114610f45575050604080518082019091526015815274496e76616c6964205769746864726177204e6f746560581b602082015260009250905081611011565b50610fa6565b610f5961014085018561505e565b9050610f69610160860186614f8e565b610f779060c081019061505e565b905014610fa6576000604051806060016040528060248152602001615d54602491396000925092509250611011565b600080610fb28661225e565b9150915081610ff85760006040518060400160405280601381526020017224b73b30b634b21029b730b93590283937b7b360691b81525060009450945094505050611011565b6040805160208101909152600081526001955093509150505b9193909250565b6000600080516020615d348339815191528260405160200161103a919061524e565b6040516020818303038152906040528051906020012060001c61105d9190615318565b92915050565b600061107e846110783686900386018661532c565b84613036565b949350505050565b61108e6131a9565b600083815260c760209081526040808320858452909152902081906110b38282615605565b9050507f3d09e10d1c966d01c4a2c14d0ac9af253486aa5e99b6cffe9019c4d43eb1fb238383836040516110e993929190615708565b60405180910390a1505050565b60408051808201825283815260208101839052905163014cf2b360e51b815260009173f5fe83643dd42d408c19b938866fa441c6c525639163299e566091611140916004016157e9565b602060405180830381865af415801561115d573d6000803e3d6000fd5b505050506040513d601f19601f82011682018060405250810190611181919061581a565b9392505050565b60008060008085156111d1576127106111aa6001600160781b03871689615833565b6111b4919061585c565b6111be9088615882565b91506111ca8288615882565b905061120d565b869150816111e1866127106158a9565b6001600160781b03166111f684612710615833565b611200919061585c565b61120a9190615882565b90505b90969095509350505050565b600080805b838110156112865784848281811061123857611238614c10565b905060200281019061124a91906158c9565b61125990610160810190614f8e565b6112679060c081019061505e565b611272915083614d17565b915061127f600182614d17565b905061121e565b509392505050565b600060606112a260a08401608085016150ba565b6001600160781b03166000036112e5575050604080518082019091526012815271496e76616c6964204e6f74652056616c756560701b6020820152600092909150565b600080516020615d3483398151915283351061132c57505060408051808201909152601081526f496e76616c6964204e6f7465204e504b60801b6020820152600092909150565b600161133e6040850160208601615041565b600281111561134f5761134f614af7565b148015611375575061136760a08401608085016150ba565b6001600160781b0316600114155b156113b1575050604080518082019091526016815275496e76616c6964204e4654204e6f74652056616c756560501b6020820152600092909150565b5050604080516020810190915260008152600192909150565b6113d26131a9565b600090815260fc60205260409020805460ff19166001179055565b6113f56131a9565b6113ff6000613203565b565b600073afd3fc0396f793b35e433bbe0e1160329bf0abd3635a53025d60405180606001604052808560000151815260200161143f866020015161177a565b815260200185604001516001600160781b031660001b8152506040518263ffffffff1660e01b815260040161147491906158e0565b602060405180830381865af4158015611491573d6000803e3d6000fd5b505050506040513d601f19601f8201168201806040525081019061105d919061581a565b6114bd613fc4565b600083815260c76020908152604080832085845290915290819020815160c081019092528054829082906114f090615372565b80601f016020809104026020016040519081016040528092919081815260200182805461151c90615372565b80156115695780601f1061153e57610100808354040283529160200191611569565b820191906000526020600020905b81548152906001019060200180831161154c57829003601f168201915b505050918352505060408051808201825260018401548152600280850154602080840191909152840191909152815160808101808452938301939092600386019284929183019184919082845b8154815260200190600101908083116115b657505050918352505060408051808201918290526020909201919060028481019182845b8154815260200190600101908083116115ec575050509190925250505081526040805160808101808352602090930192909160078501918391820190839060029082845b81548152602001906001019080831161163057505050918352505060408051808201918290526020909201919060028481019182845b8154815260200190600101908083116116665750505091909252505050815260408051608081018083526020909301929091600b8501918391820190839060029082845b8154815260200190600101908083116116aa57505050918352505060408051808201918290526020909201919060028481019182845b8154815260200190600101908083116116e0575050505050815250508152602001600f8201805480602002602001604051908101604052809291908181526020016000905b8282101561176b57838290600052602060002090600202016040518060400160405290816000820154815260200160018201548152505081526020019060010190611725565b50505091525090949350505050565b6000808251600281111561179057611790614af7565b036117a65750602001516001600160a01b031690565b600080516020615d348339815191528260405160200161103a9190615908565b600054610100900460ff16158080156117e65750600054600160ff909116105b806118005750303b158015611800575060005460ff166001145b6118635760405162461bcd60e51b815260206004820152602e60248201527f496e697469616c697a61626c653a20636f6e747261637420697320616c72656160448201526d191e481a5b9a5d1a585b1a5e995960921b606482015260840161089f565b6000805460ff191660011790558015611886576000805461ff0019166101001790555b61188e613255565b611896613284565b61189f86611ac2565b6118aa858585611b33565b6118b382612781565b60fc6020527f18a261e1efd282dd636becf59b85995514ab34d1c1c9a3e1128aac786b5472de8054600160ff1991821681179092557f35cc25be27a7e44e9e6eb23f103c8980fe6d01e7b6e981c2c07b23911ac79e8b805482168317905573cc29dbf69896278a0c6b886ef8cc30a56fa6164a6000527f7e1bfa3bd01233beed03b737790a265ae14e11664e22f82316c6f65a13e15c8c80549091169091179055801561199a576000805461ff0019169055604051600181527f7f26b83ff96e1f2b6a682f133852f6798a09c465da95921460cefb38474024989060200160405180910390a15b505050505050565b6119aa6131a9565b60005b81811015611abd57609560008484848181106119cb576119cb614c10565b90506020020160208101906119e09190614a5a565b6001600160a01b0316815260208101919091526040016000205460ff1615611aab5760956000848484818110611a1857611a18614c10565b9050602002016020810190611a2d9190614a5a565b6001600160a01b031681526020810191909152604001600020805460ff19169055828282818110611a6057611a60614c10565b9050602002016020810190611a759190614a5a565b6001600160a01b03167f2ef13bd1aff17b0f9c85afaf228e84266c8394d9d381735e83fe23f607113e2e60405160405180910390a25b611ab6600182614d17565b90506119ad565b505050565b611aca6131a9565b60f9546001600160a01b03828116911614610b405760f980546001600160a01b0319166001600160a01b0383169081179091556040519081527f1ac54af2084ba0e4b86b7bc54b978ce7dd4ca046d3dec89d7c8963873820c0bb9060200160405180910390a150565b611b3b6131a9565b60fa546001600160781b038481169116141580611b6d575060fa546001600160781b03838116600160781b9092041614155b80611b7a575060fb548114155b15611abd57611b8c6002612710615916565b6001600160781b0316836001600160781b03161115611bf95760405162461bcd60e51b8152602060048201526024808201527f5261696c67756e4c6f6769633a20536869656c642046656520657863656564736044820152632035302560e01b606482015260840161089f565b611c066002612710615916565b6001600160781b0316826001600160781b03161115611c765760405162461bcd60e51b815260206004820152602660248201527f5261696c67756e4c6f6769633a20556e736869656c642046656520657863656560448201526564732035302560d01b606482015260840161089f565b60fa80546001600160781b038581166001600160f01b03199092168217600160781b9186169182021790925560fb8390556040805191825260208201929092529081018290527f472cfc031d19bcc54db01976ce486cc12dc3d489e6adced1eb5a782cd55cfdf2906060016110e9565b6000611cf28383611219565b90506000816001600160401b03811115611d0e57611d0e614276565b604051908082528060200260200182016040528015611d37578160200160208202803683370190505b509050600080836001600160401b03811115611d5557611d55614276565b604051908082528060200260200182016040528015611d8e57816020015b611d7b614027565b815260200190600190039081611d735790505b5090506000856001600160401b03811115611dab57611dab614276565b604051908082528060200260200182016040528015611dfd57816020015b604080516080810182526000808252602080830182905292820181905260608201528252600019909201910181611dc95790505b50905060005b8681101561201f576000806000611e378b8b86818110611e2557611e25614c10565b905060200281019061033f91906158c9565b9250925092508282604051602001611e4f9190614c26565b60405160208183030381529060405290611e7c5760405162461bcd60e51b815260040161089f9190614c62565b50611eac8b8b86818110611e9257611e92614c10565b9050602002810190611ea491906158c9565b8989896133ab565b96506000808c8c87818110611ec357611ec3614c10565b9050602002810190611ed591906158c9565b611ee490610160810190614f8e565b611ef5906060810190604001615041565b6002811115611f0657611f06614af7565b1415905060405180608001604052808d8d88818110611f2757611f27614c10565b9050602002810190611f3991906158c9565b611f489061012081019061505e565b63ffffffff1682525060200182611f93578d8d88818110611f6b57611f6b614c10565b9050602002810190611f7d91906158c9565b611f8c9061014081019061505e565b9050611fd3565b60018e8e89818110611fa757611fa7614c10565b9050602002810190611fb991906158c9565b611fc89061014081019061505e565b611fd39291506150a7565b63ffffffff168152602001821515815260200183815250868681518110611ffc57611ffc614c10565b6020026020010181905250505050506001816120189190614d17565b9050611e03565b507f29696e3cb1956aca85bbcae445e3ed9bb933a4b7328445f65e872e49af7229ea3382604051612051929190614b91565b60405180910390a160005b8681101561217c57600088888381811061207857612078614c10565b905060200281019061208a91906158c9565b61209990610160810190614f8e565b6120aa906060810190604001615041565b60028111156120bb576120bb614af7565b1461216a576000806120f38a8a858181106120d8576120d8614c10565b90506020028101906120ea91906158c9565b6101800161128e565b9150915081816040516020016121099190614c26565b604051602081830303815290604052906121365760405162461bcd60e51b815260040161089f9190614c62565b506121678a8a8581811061214c5761214c614c10565b905060200281019061215e91906158c9565b61018001613695565b50505b612175600182614d17565b905061205c565b5060008061218a8651610b43565b87519193509150156121d4577f56a618cda1e34057b7f849a5792f6c8587a2dbe11c83d0254e72cb3daffda7d1828288876040516121cb9493929190615930565b60405180910390a15b6121dd86612da1565b50504360fe5550505050505050565b6121f46131a9565b600090815260fc60205260409020805460ff19169055565b606a816010811061221c57600080fd5b0154905081565b61225b600080516020615d348339815191527f95b5e3f3c951508f13e7771152f5b7c7329a294917685c10a571c9247e3b9fff615318565b81565b6000808061227061012085018561505e565b91506000905061228461014086018661505e565b600084815260c760209081526040808320848452909152808220815160c08101909252805493955091935091829082906122bd90615372565b80601f01602080910402602001604051908101604052809291908181526020018280546122e990615372565b80156123365780601f1061230b57610100808354040283529160200191612336565b820191906000526020600020905b81548152906001019060200180831161231957829003601f168201915b505050918352505060408051808201825260018401548152600280850154602080840191909152840191909152815160808101808452938301939092600386019284929183019184919082845b81548152602001906001019080831161238357505050918352505060408051808201918290526020909201919060028481019182845b8154815260200190600101908083116123b9575050509190925250505081526040805160808101808352602090930192909160078501918391820190839060029082845b8154815260200190600101908083116123fd57505050918352505060408051808201918290526020909201919060028481019182845b8154815260200190600101908083116124335750505091909252505050815260408051608081018083526020909301929091600b8501918391820190839060029082845b81548152602001906001019080831161247757505050918352505060408051808201918290526020909201919060028481019182845b8154815260200190600101908083116124ad575050505050815250508152602001600f8201805480602002602001604051908101604052809291908181526020016000905b82821015612538578382906000526020600020906002020160405180604001604052908160008201548152602001600182015481525050815260200190600101906124f2565b5050509152505060208101515190915060000361258f5760405162461bcd60e51b815260206004820152601560248201527415995c9a599a595c8e8812d95e481b9bdd081cd95d605a1b604482015260640161089f565b60008261259d856002614d17565b6125a79190614d17565b6001600160401b038111156125be576125be614276565b6040519080825280602002602001820160405280156125e7578160200160208202803683370190505b50905086610100013560001c8160008151811061260657612606614c10565b6020908102919091010152612622610361610160890189614f8e565b8160018151811061263557612635614c10565b60200260200101818152505060005b848110156126ad5761265a61012089018961505e565b8281811061266a5761266a614c10565b6020029190910135905082612680836002614d17565b8151811061269057612690614c10565b60209081029190910101526126a6600182614d17565b9050612644565b5060005b83811015612725576126c761014089018961505e565b828181106126d7576126d7614c10565b6020029190910135905082826126ee886002614d17565b6126f89190614d17565b8151811061270857612708614c10565b602090810291909101015261271e600182614d17565b90506126b1565b506000612733838984611063565b905061deac19320161276d5760018260018151811061275457612754614c10565b602002602001015160001b965096505050505050915091565b808260018151811061275457612754614c10565b6127896131a9565b6001600160a01b0381166127ee5760405162461bcd60e51b815260206004820152602660248201527f4f776e61626c653a206e6577206f776e657220697320746865207a65726f206160448201526564647265737360d01b606482015260840161089f565b610b4081613203565b6127ff6131a9565b60005b81811015611abd576095600084848481811061282057612820614c10565b90506020020160208101906128359190614a5a565b6001600160a01b0316815260208101919091526040016000205460ff166129085760016095600085858581811061286e5761286e614c10565b90506020020160208101906128839190614a5a565b6001600160a01b031681526020810191909152604001600020805460ff19169115159190911790558282828181106128bd576128bd614c10565b90506020020160208101906128d29190614a5a565b6001600160a01b03167f46742f555939247f80b50a8ca895a561933c48bc9a06ccb0c812e97ac723d33f60405160405180910390a25b612913600182614d17565b9050612802565b612922613f78565b600061292c613f78565b60008061293f6040870160208801615041565b600281111561295057612950614af7565b03612b795760006129676060870160408801614a5a565b905060008061299761297f60a08a0160808b016150ba565b60fa546001600160781b039182169160019116611188565b91509150806001600160781b03169350604051806060016040528089600001358152602001896020018036038101906129d09190614a77565b81526001600160781b0384166020909101526040516370a0823160e01b81523060048201529095506000906001600160a01b038516906370a0823190602401602060405180830381865afa158015612a2c573d6000803e3d6000fd5b505050506040513d601f19601f82011682018060405250810190612a50919061581a565b9050612a706001600160a01b03851633306001600160781b038716613886565b6040516370a0823160e01b81523060048201526000906001600160a01b038616906370a0823190602401602060405180830381865afa158015612ab7573d6000803e3d6000fd5b505050506040513d601f19601f82011682018060405250810190612adb919061581a565b90506001600160781b038416612af183836150a7565b14612b4a5760405162461bcd60e51b815260206004820152602360248201527f5261696c67756e4c6f6769633a204552433230207472616e73666572206661696044820152621b195960ea1b606482015260840161089f565b60f954612b6f906001600160a01b03878116913391166001600160781b038716613886565b5050505050612d97565b6001612b8b6040870160208801615041565b6002811115612b9c57612b9c614af7565b03612d3f576000612bb36060870160408801614a5a565b600092509050612bc8368790038701876148f6565b92506020860160fd6000612be46104dc368b90038b0185614a77565b81526020019081526020016000208181612bfe9190615a45565b50506040516323b872dd60e01b8152336004820152306024820152606087013560448201526001600160a01b038216906323b872dd90606401600060405180830381600087803b158015612c5157600080fd5b505af1158015612c65573d6000803e3d6000fd5b50506040516331a9108f60e11b8152606089013560048201523092506001600160a01b0384169150636352211e90602401602060405180830381865afa158015612cb3573d6000803e3d6000fd5b505050506040513d601f19601f82011682018060405250810190612cd79190615aab565b6001600160a01b031614612d395760405162461bcd60e51b8152602060048201526024808201527f5261696c67756e4c6f6769633a20455243373231206469646e2774207472616e60448201526339b332b960e11b606482015260840161089f565b50612d97565b60405162461bcd60e51b815260206004820152602760248201527f5261696c67756e4c6f6769633a2045524331313535206e6f74207965742073756044820152661c1c1bdc9d195960ca1b606482015260840161089f565b9094909350915050565b80516000819003612db0575050565b612dbc60106002614f82565b81606654612dca9190614d17565b1115612dd857612dd86138f7565b606680549082906000612deb8385614d17565b909155506000905080805b6010811015612fe557600184901c91506000612e13600286615318565b600103612e9957612e2883600187901c6150a7565b9350612e61607a8360108110612e4057612e40614c10565b0154888381518110612e5457612e54614c10565b60200260200101516110f6565b878581518110612e7357612e73614c10565b6020908102919091010152612e89600182614d17565b9050612e96600186614d17565b94505b85811015612fbf576000612eae6001886150a7565b821015612ee05787612ec1836001614d17565b81518110612ed157612ed1614c10565b60200260200101519050612ef8565b606a8360108110612ef357612ef3614c10565b015490505b612f036001886150a7565b821480612f195750612f166002886150a7565b82145b15612f4e57878281518110612f3057612f30614c10565b6020026020010151607a8460108110612f4b57612f4b614c10565b01555b612f5c84600188901c6150a7565b9450612f81888381518110612f7357612f73614c10565b6020026020010151826110f6565b888681518110612f9357612f93614c10565b6020908102919091010152612fa9600287614d17565b9550612fb89050600282614d17565b9050612e99565b829450836001612fcf9190614d17565b9550612fde9050600182614d17565b9050612df6565b5084600081518110612ff957612ff9614c10565b60209081029190910181015160678190556069546000908152608a83526040808220928252919092529020805460ff191660011790555050505050565b6040805180820190915260008082526020820181905290815b835181101561314157600080516020615d3483398151915284828151811061307957613079614c10565b6020026020010151106130d85760405162461bcd60e51b815260206004820152602160248201527f536e61726b3a20496e707574203e20534e41524b5f5343414c41525f4649454c6044820152601160fa1b606482015260840161089f565b61312d826131288860a001518460016130f19190614d17565b8151811061310157613101614c10565b602002602001015187858151811061311b5761311b614c10565b602002602001015161391e565b6139c2565b915061313a600182614d17565b905061304f565b5061316a818660a0015160008151811061315d5761315d614c10565b60200260200101516139c2565b90506131a061317c8560000151613a62565b856020015187602001518860400151858a606001518a604001518c60800151613ba4565b95945050505050565b6033546001600160a01b031633146113ff5760405162461bcd60e51b815260206004820181905260248201527f4f776e61626c653a2063616c6c6572206973206e6f7420746865206f776e6572604482015260640161089f565b603380546001600160a01b038381166001600160a01b0319831681179093556040519116919082907f8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e090600090a35050565b600054610100900460ff1661327c5760405162461bcd60e51b815260040161089f90615ac8565b6113ff613d20565b600054610100900460ff166132ab5760405162461bcd60e51b815260040161089f90615ac8565b6132e3600080516020615d348339815191527f95b5e3f3c951508f13e7771152f5b7c7329a294917685c10a571c9247e3b9fff615318565b606a556000613320600080516020615d348339815191527f95b5e3f3c951508f13e7771152f5b7c7329a294917685c10a571c9247e3b9fff615318565b905060005b60108110156133785781606a826010811061334257613342614c10565b015581607a826010811061335857613358614c10565b015561336482806110f6565b9150613371600182614d17565b9050613325565b50606781905560688190556069546000908152608a6020908152604080832093835292905220805460ff19166001179055565b6000805b6133bd61012087018761505e565b905081101561351657606560006133d8610160890189614f8e565b6133e6906020810190615026565b61ffff16815260200190815260200160002060008780610120019061340b919061505e565b8481811061341b5761341b614c10565b602090810292909201358352508101919091526040016000205460ff16156134855760405162461bcd60e51b815260206004820181905260248201527f5261696c67756e4c6f6769633a204e6f746520616c7265616479207370656e74604482015260640161089f565b6001606560006134996101608a018a614f8e565b6134a7906020810190615026565b61ffff1681526020019081526020016000206000888061012001906134cc919061505e565b858181106134dc576134dc614c10565b60209081029290920135835250810191909152604001600020805460ff191691151591909117905561350f600182614d17565b90506133af565b507f781745c57906dc2f175fec80a9c691744c91c48a34a83672c41c2604774eb11f613546610160870187614f8e565b613554906020810190615026565b61356261012088018861505e565b60405161357193929190615b13565b60405180910390a160005b61358a610160870187614f8e565b6135989060c081019061505e565b905081101561366d576135af61014087018761505e565b828181106135bf576135bf614c10565b905060200201358582866135d39190614d17565b815181106135e3576135e3614c10565b60209081029190910101526135fc610160870187614f8e565b61360a9060c081019061505e565b8281811061361a5761361a614c10565b905060200281019061362c9190615b58565b61363590615b6e565b836136408387614d17565b8151811061365057613650614c10565b6020908102919091010152613666600182614d17565b905061357c565b5061367c610160860186614f8e565b61368a9060c081019061505e565b6131a0915084614d17565b60006136a76040830160208401615041565b60028111156136b8576136b8614af7565b036137945760006136cf6060830160408401614a5a565b90506000806137066136e760a08601608087016150ba565b60fa546001600160781b0391821691600191600160781b900416611188565b90925090506137296001600160a01b03841685356001600160781b038516613d50565b60f95461374c906001600160a01b0385811691166001600160781b038416613d50565b6040517fd93cf895c7d5b2cd7dc7a098b678b3089f37d91f48d9b83a0800a91cbdf052849061378690863590602088019086908690615c76565b60405180910390a150505050565b60016137a66040830160208401615041565b60028111156137b7576137b7614af7565b03612d3f5760006137ce6060830160408401614a5a565b6040516323b872dd60e01b81523060048201526001600160a01b0384358116602483015260608501356044830152919250908216906323b872dd90606401600060405180830381600087803b15801561382657600080fd5b505af115801561383a573d6000803e3d6000fd5b50506040517fd93cf895c7d5b2cd7dc7a098b678b3089f37d91f48d9b83a0800a91cbdf05284925061387a91508435906020860190600190600090615cb5565b60405180910390a15050565b6040516001600160a01b03808516602483015283166044820152606481018290526138f19085906323b872dd60e01b906084015b60408051601f198184030181529190526020810180516001600160e01b03166001600160e01b031990931692909217909152613d80565b50505050565b606854606755600060668190556069805460019290613917908490614d17565b9091555050565b604080518082019091526000808252602082015261393a61405b565b835181526020808501519082015260408082018490526000908360608460076107d05a03fa9050806139ba5760405162461bcd60e51b815260206004820152602360248201527f536e61726b3a205363616c6172204d756c7469706c69636174696f6e204661696044820152621b195960ea1b606482015260840161089f565b505092915050565b60408051808201909152600080825260208201526139de614079565b83518152602080850151818301528351604080840191909152848201516060840152805180820182526000808252928101839052908160808560066107d05a03fa9150816131a05760405162461bcd60e51b815260206004820152601160248201527014db985c9ace881059190811985a5b1959607a1b604482015260640161089f565b60408051808201909152600080825260208201528151158015613a8757506020820151155b15613aa5575050604080518082019091526000808252602082015290565b6000600080516020615d14833981519152835180099050600080516020615d14833981519152835182099050600080516020615d148339815191526003820890506000600080516020615d14833981519152602085015180099050818114613b4f5760405162461bcd60e51b815260206004820152601760248201527f536e61726b3a20496e76616c6964206e65676174696f6e000000000000000000604482015260640161089f565b604051806040016040528085600001518152602001600080516020615d148339815191528660200151613b829190615318565b613b9a90600080516020615d148339815191526150a7565b9052949350505050565b6040805161030081018252895181526020808b015181830152895151928201929092528851820151606082015288820180515160808301525182015160a0820152875160c08201528782015160e08201528651516101008201528651820151610120820152868201805151610140830152518201516101608201528551610180820152858201516101a08201528451516101c082015284518201516101e08201528482018051516102008301525182015161022082015283516102408201528382015161026082015282515161028082015282518201516102a08201528282018051516102c083015251909101516102e0820152600090613ca3614097565b60006020826103008560086107d05a03fa905080613d0e5760405162461bcd60e51b815260206004820152602260248201527f536e61726b3a2050616972696e6720566572696669636174696f6e204661696c604482015261195960f21b606482015260840161089f565b505115159a9950505050505050505050565b600054610100900460ff16613d475760405162461bcd60e51b815260040161089f90615ac8565b6113ff33613203565b6040516001600160a01b038316602482015260448101829052611abd90849063a9059cbb60e01b906064016138ba565b6000613dd5826040518060400160405280602081526020017f5361666545524332303a206c6f772d6c6576656c2063616c6c206661696c6564815250856001600160a01b0316613e559092919063ffffffff16565b9050805160001480613df6575080806020019051810190613df69190615ce4565b611abd5760405162461bcd60e51b815260206004820152602a60248201527f5361666545524332303a204552433230206f7065726174696f6e20646964206e6044820152691bdd081cdd58d8d9595960b21b606482015260840161089f565b606061107e848460008585600080866001600160a01b03168587604051613e7c9190615d01565b60006040518083038185875af1925050503d8060008114613eb9576040519150601f19603f3d011682016040523d82523d6000602084013e613ebe565b606091505b5091509150613ecf87838387613eda565b979650505050505050565b60608315613f49578251600003613f42576001600160a01b0385163b613f425760405162461bcd60e51b815260206004820152601d60248201527f416464726573733a2063616c6c20746f206e6f6e2d636f6e7472616374000000604482015260640161089f565b508161107e565b61107e8383815115613f5e5781518083602001fd5b8060405162461bcd60e51b815260040161089f9190614c62565b604080516060808201835260008083528351918201845280825260208281018290529382015290918201905b8152600060209091015290565b6040518060400160405280613fa461405b565b6040518060c0016040528060608152602001613ff3604051806040016040528060008152602001600081525090565b81526020016140006140b5565b815260200161400d6140b5565b815260200161401a6140b5565b8152602001606081525090565b6040518060a0016040528061403a614079565b81526000602082018190526040820152606080820181905260809091015290565b60405180606001604052806003906020820280368337509192915050565b60405180608001604052806004906020820280368337509192915050565b60405180602001604052806001906020820280368337509192915050565b60405180604001604052806140c86140da565b81526020016140d56140da565b905290565b60405180604001604052806002906020820280368337509192915050565b6000806020838503121561410b57600080fd5b82356001600160401b038082111561412257600080fd5b818501915085601f83011261413657600080fd5b81358181111561414557600080fd5b8660206101208302850101111561415b57600080fd5b60209290920196919550909350505050565b60006020828403121561417f57600080fd5b5035919050565b60006020828403121561419857600080fd5b81356001600160401b038111156141ae57600080fd5b8201610220818503121561118157600080fd5b60005b838110156141dc5781810151838201526020016141c4565b50506000910152565b600081518084526141fd8160208601602086016141c1565b601f01601f19169290920160200192915050565b831515815260606020820152600061422c60608301856141e5565b9050826040830152949350505050565b60006020828403121561424e57600080fd5b81356001600160401b0381111561426457600080fd5b820160e0818503121561118157600080fd5b634e487b7160e01b600052604160045260246000fd5b604080519081016001600160401b03811182821017156142ae576142ae614276565b60405290565b60405160c081016001600160401b03811182821017156142ae576142ae614276565b604051606081016001600160401b03811182821017156142ae576142ae614276565b60405160a081016001600160401b03811182821017156142ae576142ae614276565b604051608081016001600160401b03811182821017156142ae576142ae614276565b604051601f8201601f191681016001600160401b038111828210171561436457614364614276565b604052919050565b600082601f83011261437d57600080fd5b81356001600160401b0381111561439657614396614276565b6143a9601f8201601f191660200161433c565b8181528460208386010111156143be57600080fd5b816020850160208301376000918101602001919091529392505050565b6000604082840312156143ed57600080fd5b6143f561428c565b9050813581526020820135602082015292915050565b600082601f83011261441c57600080fd5b604051604081018181106001600160401b038211171561443e5761443e614276565b806040525080604084018581111561445557600080fd5b845b8181101561446f578035835260209283019201614457565b509195945050505050565b60006080828403121561448c57600080fd5b61449461428c565b90506144a0838361440b565b81526144af836040840161440b565b602082015292915050565b60006001600160401b038211156144d3576144d3614276565b5060051b60200190565b600082601f8301126144ee57600080fd5b813560206145036144fe836144ba565b61433c565b82815260069290921b8401810191818101908684111561452257600080fd5b8286015b848110156145465761453888826143db565b835291830191604001614526565b509695505050505050565b6000610100828403121561456457600080fd5b50919050565b600082601f83011261457b57600080fd5b8135602061458b6144fe836144ba565b82815260059290921b840181019181810190868411156145aa57600080fd5b8286015b8481101561454657803583529183019183016145ae565b600080600061014084860312156145db57600080fd5b83356001600160401b03808211156145f257600080fd5b90850190610200828803121561460757600080fd5b61460f6142b4565b82358281111561461e57600080fd5b61462a8982860161436c565b82525061463a88602085016143db565b602082015261464c886060850161447a565b604082015261465e8860e0850161447a565b606082015261467188610160850161447a565b60808201526101e08301358281111561468957600080fd5b614695898286016144dd565b60a08301525094506146aa8760208801614551565b93506101208601359150808211156146c157600080fd5b506146ce8682870161456a565b9150509250925092565b6000806000606084860312156146ed57600080fd5b833592506020840135915060408401356001600160401b0381111561471157600080fd5b8401610200818703121561472457600080fd5b809150509250925092565b6000806040838503121561474257600080fd5b50508035926020909101359150565b8015158114610b4057600080fd5b80356001600160781b038116811461477657600080fd5b919050565b60008060006060848603121561479057600080fd5b83356001600160881b03811681146147a757600080fd5b925060208401356147b781614751565b91506147c56040850161475f565b90509250925092565b60008083601f8401126147e057600080fd5b5081356001600160401b038111156147f757600080fd5b6020830191508360208260051b850101111561481257600080fd5b9250929050565b6000806020838503121561482c57600080fd5b82356001600160401b0381111561484257600080fd5b61120d858286016147ce565b600060a0828403121561456457600080fd5b821515815260406020820152600061107e60408301846141e5565b60038110610b4057600080fd5b6001600160a01b0381168114610b4057600080fd5b803561477681614888565b6000606082840312156148ba57600080fd5b6148c26142d6565b905081356148cf8161487b565b815260208201356148df81614888565b806020830152506040820135604082015292915050565b600060a0828403121561490857600080fd5b6149106142d6565b8235815261492184602085016148a8565b60208201526149326080840161475f565b60408201529392505050565b8060005b60028110156138f1578151845260209384019390910190600101614942565b61496c82825161493e565b6020810151611abd604084018261493e565b600060208083528351610200808386015261499d6102208601836141e5565b91508286015160406149bb8188018380518252602090810151910152565b8088015191506149ce6080880183614961565b606088015191506149e3610100880183614961565b608088015191506149f8610180880183614961565b60a0880151878503601f190193880193909352825180855292850193850192600092505b80831015614a4d57614a3984865180518252602090810151910152565b938501939281019260019290920191614a1c565b5091979650505050505050565b600060208284031215614a6c57600080fd5b813561118181614888565b600060608284031215614a8957600080fd5b61118183836148a8565b600080600080600060a08688031215614aab57600080fd5b8535614ab681614888565b9450614ac46020870161475f565b9350614ad26040870161475f565b9250606086013591506080860135614ae981614888565b809150509295509295909350565b634e487b7160e01b600052602160045260246000fd5b60038110610b4057634e487b7160e01b600052602160045260246000fd5b60608101614b3885614b0d565b9381526001600160a01b0392909216602083015260409091015290565b600080600060608486031215614b6a57600080fd5b614b738461475f565b9250614b816020850161475f565b9150604084013590509250925092565b6001600160a01b03831681526040602080830182905283518383018190526000929160609182860190878301865b82811015614c01578151805163ffffffff9081168652868201511686860152878101511515888601528601518685015260809093019290840190600101614bbf565b50919998505050505050505050565b634e487b7160e01b600052603260045260246000fd5b7302930b4b633bab729b6b0b93a2bb0b63632ba1d160651b815260008251614c558160148501602087016141c1565b9190910160140192915050565b60208152600061118160208301846141e5565b600060808284031215614c8757600080fd5b614c8f61428c565b83601f840112614c9e57600080fd5b604051606081018181106001600160401b0382111715614cc057614cc0614276565b604052806060850186811115614cd557600080fd5b855b81811015614cef578035835260209283019201614cd7565b50918352503560208201529392505050565b634e487b7160e01b600052601160045260246000fd5b8082018082111561105d5761105d614d01565b8051614d3581614b0d565b82526020818101516001600160a01b031690830152604090810151910152565b60008151808452602080850194508084016000805b84811015614db3578251805189845b6003811015614d9657825182529187019190870190600101614d79565b505050840151606089015260809097019691830191600101614d6a565b50959695505050505050565b600081518084526020808501945080840160005b83811015614def57815187529582019590820190600101614dd3565b509495945050505050565b600060a0808301888452602088818601526040838187015282895180855260c088019150838b01945060005b81811015614e665785518051845285810151614e4487860182614d2a565b508401516001600160781b031660808401529484019491860191600101614e26565b50508681036060880152614e7a818a614d55565b9450505050508281036080840152614e928185614dbf565b98975050505050505050565b600181815b80851115614ed9578160001904821115614ebf57614ebf614d01565b80851615614ecc57918102915b93841c9390800290614ea3565b509250929050565b600082614ef05750600161105d565b81614efd5750600061105d565b8160018114614f135760028114614f1d57614f39565b600191505061105d565b60ff841115614f2e57614f2e614d01565b50506001821b61105d565b5060208310610133831016604e8410600b8410161715614f5c575081810a61105d565b614f668383614e9e565b8060001904821115614f7a57614f7a614d01565b029392505050565b60006111818383614ee1565b6000823560de19833603018112614fa457600080fd5b9190910192915050565b803568ffffffffffffffffff8116811461477657600080fd5b600060208284031215614fd957600080fd5b61118182614fae565b80356001600160401b038116811461477657600080fd5b60006020828403121561500b57600080fd5b61118182614fe2565b803561ffff8116811461477657600080fd5b60006020828403121561503857600080fd5b61118182615014565b60006020828403121561505357600080fd5b81356111818161487b565b6000808335601e1984360301811261507557600080fd5b8301803591506001600160401b0382111561508f57600080fd5b6020019150600581901b360382131561481257600080fd5b8181038181111561105d5761105d614d01565b6000602082840312156150cc57600080fd5b6111818261475f565b6000808335601e198436030181126150ec57600080fd5b83016020810192503590506001600160401b0381111561510b57600080fd5b8060051b360382131561481257600080fd5b6000808335601e1984360301811261513457600080fd5b83016020810192503590506001600160401b0381111561515357600080fd5b80360382131561481257600080fd5b81835281816020850137506000828201602090810191909152601f909101601f19169091010190565b81835260006020808501808196508560051b81019150846000805b88811015615240578385038a52823560fe198936030181126151c6578283fd5b8801610100608080838937828101359088015260a0808301359088015260c06151f18184018461511d565b83838b0152615203848b018284615162565b935050505060e06152168184018461511d565b9350888303828a015261522a838583615162565b9d8a019d985050509387019350506001016151a6565b509298975050505050505050565b6020815261ffff61525e83615014565b16602082015268ffffffffffffffffff61527a60208401614fae565b166040820152600060408301356152908161487b565b61529981614b0d565b806060840152506001600160401b036152b460608501614fe2565b1660808301526152c66080840161489d565b6001600160a01b03811660a08401525060a083013560c08301526152ed60c08401846150d5565b60e0808501526131a06101008501828461518b565b634e487b7160e01b600052601260045260246000fd5b60008261532757615327615302565b500690565b6000610100828403121561533f57600080fd5b6153476142d6565b61535184846143db565b8152615360846040850161447a565b60208201526149328460c085016143db565b600181811c9082168061538657607f821691505b60208210810361456457634e487b7160e01b600052602260045260246000fd5b601f821115611abd57600081815260208120601f850160051c810160208610156153cd5750805b601f850160051c820191505b8181101561199a578281556001016153d9565b6001600160401b0383111561540357615403614276565b615417836154118354615372565b836153a6565b6000601f84116001811461544b57600085156154335750838201355b600019600387901b1c1916600186901b1783556154a5565b600083815260209020601f19861690835b8281101561547c578685013582556020948501946001909201910161545c565b50868210156154995760001960f88860031b161c19848701351681555b505060018560011b0183555b5050505050565b8160005b60028110156154cd578135838201556020909101906001016154b0565b50506040820160005b60028082106154e557506138f1565b8235848301909101556020909101906001016154d6565b6000808335601e1984360301811261551357600080fd5b8301803591506001600160401b0382111561552d57600080fd5b6020019150600681901b360382131561481257600080fd5b6801000000000000000083111561555e5761555e614276565b8054838255808410156155cc5760016001600160ff1b03828116831461558657615586614d01565b808616861461559757615597614d01565b5060008381526020812086831b81019084841b015b808210156155c75782825582848301556002820191506155ac565b505050505b5060008181526020812083915b8581101561199a57823582556020830135600183015560409290920191600291909101906001016155d9565b8135601e1983360301811261561957600080fd5b820180356001600160401b0381111561563157600080fd5b60208201915080360382131561564657600080fd5b6156518183856153ec565b5050602082013560018201556040820135600282015561567760608301600383016154ac565b61568760e08301600783016154ac565b6156986101608301600b83016154ac565b6156a66101e08301836154fc565b6138f18183600f8601615545565b6040818337604080820160408401375050565b81835260208301925060008160005b848110156156fe578135865260208083013590870152604095860195909101906001016156d6565b5093949350505050565b838152826020820152606060408201526000615724838461511d565b610200606085015261573b61026085018284615162565b60208601356080860152604086013560a086015291506157589050565b61576860c08401606086016156b4565b615779610140840160e086016156b4565b61578b6101c0840161016086016156b4565b6101e0840135601e198536030181126157a357600080fd5b84016020810190356001600160401b038111156157bf57600080fd5b8060061b36038213156157d157600080fd5b848303605f1901610240860152614e928382846156c7565b60408101818360005b60028110156158115781518352602092830192909101906001016157f2565b50505092915050565b60006020828403121561582c57600080fd5b5051919050565b6001600160881b0382811682821681810283169291811582850482141761581157615811614d01565b60006001600160881b038084168061587657615876615302565b92169190910492915050565b6001600160881b038281168282160390808211156158a2576158a2614d01565b5092915050565b6001600160781b038281168282160390808211156158a2576158a2614d01565b6000823561021e19833603018112614fa457600080fd5b60608101818360005b60038110156158115781518352602092830192909101906001016158e9565b6060810161105d8284614d2a565b60006001600160781b038084168061587657615876615302565b60006080808301878452602087818601526040838187015282885180855260a094508488019150838a0160005b828110156159795781518452928501929085019060010161595d565b5050506060878203818901528189518084528584019150858160051b850101868c0160005b83811015615a3057868303601f1901855281518051610100908560005b60048110156159d85782518252918d0191908d01906001016159bb565b5050508a8201518d860152898201518c860152878201518160c0870152615a01828701826141e5565b9150508c820151915084810360e0860152615a1c81836141e5565b968b0196945050509088019060010161599e565b50909f9e505050505050505050505050505050565b8135615a508161487b565b615a5981614b0d565b815460ff821691508160ff1982161783556020840135615a7881614888565b6001600160a81b03199190911690911760089190911b610100600160a81b03161781556040919091013560019190910155565b600060208284031215615abd57600080fd5b815161118181614888565b6020808252602b908201527f496e697469616c697a61626c653a20636f6e7472616374206973206e6f74206960408201526a6e697469616c697a696e6760a81b606082015260800190565b61ffff84168152604060208201819052810182905260006001600160fb1b03831115615b3e57600080fd5b8260051b8085606085013791909101606001949350505050565b6000823560fe19833603018112614fa457600080fd5b60006101008236031215615b8157600080fd5b615b896142f8565b36601f840112615b9857600080fd5b615ba061431a565b806080850136811115615bb257600080fd5b855b81811015615bcc578035845260209384019301615bb4565b509083523560208301525060a0830135604082015260c08301356001600160401b0380821115615bfb57600080fd5b615c073683870161436c565b606084015260e0850135915080821115615c2057600080fd5b50615c2d3682860161436c565b60808301525092915050565b8035615c448161487b565b615c4d81614b0d565b82526020810135615c5d81614888565b6001600160a01b03166020830152604090810135910152565b6001600160a01b038516815260c08101615c936020830186615c39565b6001600160781b03808516608084015280841660a08401525095945050505050565b6001600160a01b038516815260c08101615cd26020830186615c39565b608082019390935260a0015292915050565b600060208284031215615cf657600080fd5b815161118181614751565b60008251614fa48184602087016141c156fe30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd4730644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001496e76616c6964204e6f74652043697068657274657874204172726179204c656e677468a26469706673582212207a206452ed51a37a36b0dc6da7dc14edbaa7d6207bf329b03c7501e24d688af264736f6c63430008110033"
+  }
+}

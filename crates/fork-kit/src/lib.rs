@@ -5,6 +5,7 @@ pub mod anvil;
 pub mod entry_point;
 pub mod paymaster;
 pub mod pool;
+pub mod railgun;
 pub mod relayer;
 pub mod simple_account;
 
