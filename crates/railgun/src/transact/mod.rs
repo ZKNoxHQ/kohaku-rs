@@ -2,6 +2,7 @@ mod amount;
 pub mod proved_transaction;
 mod shield_builder;
 mod spend;
+pub mod verifier_override;
 
 pub(crate) use amount::attach_fee;
 pub use amount::{AmountError, AmountIntents};

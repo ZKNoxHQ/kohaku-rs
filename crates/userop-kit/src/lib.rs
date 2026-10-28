@@ -10,4 +10,3 @@ pub mod signable_user_operation;
 pub mod signed_user_operation;
 pub mod smart_account;
 pub mod user_operation;
-pub mod validation_probe;

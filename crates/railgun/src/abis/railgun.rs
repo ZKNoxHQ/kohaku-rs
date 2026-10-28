@@ -183,6 +183,8 @@ sol! {
         // Functions
         function shield(ShieldRequest[] calldata _shieldRequests) external;
         function transact(Transaction[] calldata _transactions) external;
+        // The deployed V2.1 returns the validity alone; later sources add the bound params hash.
+        function verify(Transaction calldata _transaction) external view returns (bool);
     }
 
     #[derive(Debug, Serialize, Deserialize)]
