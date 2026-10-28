@@ -426,7 +426,7 @@ async fn prove_operation(
             .prove_transact(&inputs)
             .await
             .map_err(|e| SpendError::Prover(Box::new(e)))?,
-        None => Proof::zero(),
+        None => Proof::dummy(),
     };
 
     let merkleroot: U256 = inputs.merkleroot.into();
@@ -637,7 +637,7 @@ mod tests {
 
     /// The dummy build has the calldata shape of a real one, with an all-zero proof.
     #[test]
-    fn dummy_build_has_a_zero_proof_and_the_real_shape() {
+    fn dummy_build_has_a_dummy_proof_and_the_real_shape() {
         let me = PrivateKeySigner::new_evm(random(), random(), 1);
         let other = PrivateKeySigner::new_evm(random(), random(), 1);
         let notes = [note(&me, 0, 0, WETH, 100)];
@@ -653,8 +653,10 @@ mod tests {
         let dummy = block_on(prove_operations(None, &trees, 1, &[operation], &mut rng)).unwrap();
 
         let tx = &dummy[0].transaction;
-        assert_eq!(tx.proof.a.x, U256::ZERO);
+        assert_eq!(tx.proof.a.x, U256::from(1u8));
+        assert_eq!(tx.proof.a.y, U256::from(2u8));
         assert_eq!(tx.proof.b.x, [U256::ZERO; 2]);
+        assert_eq!(tx.proof.c.x, U256::ZERO);
         assert_eq!(tx.nullifiers.len(), 1);
         assert_eq!(tx.commitments.len(), 2);
         assert_eq!(tx.boundParams.commitmentCiphertext.len(), 2);
