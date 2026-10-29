@@ -5332,8 +5332,6 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "tracing-wasm",
- "tsify",
- "wasm-bindgen",
  "wasmer",
  "web-time",
 ]

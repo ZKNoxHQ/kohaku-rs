@@ -44,7 +44,6 @@ use crate::{
 const SEED_FEE: u128 = 100_000_000;
 
 #[derive(Debug, Serialize)]
-#[cfg_attr(js, derive(tsify::Tsify))]
 pub struct BalanceEntry {
     pub asset: AssetId,
     /// If POI is enabled, the spendability status from the local list copy.
@@ -56,7 +55,6 @@ pub struct BalanceEntry {
 }
 
 #[derive(Debug, Serialize)]
-#[cfg_attr(js, derive(tsify::Tsify))]
 pub struct NoteEntry {
     pub asset: AssetId,
     /// If POI is enabled, the spendability status from the local list copy.
@@ -70,7 +68,6 @@ pub struct NoteEntry {
     #[serde(rename = "leafIndex")]
     pub leaf_index: u32,
     #[serde(rename = "blindedCommitment")]
-    #[cfg_attr(js, tsify(type = "`0x${string}`"))]
     pub blinded_commitment: String,
     #[serde(rename = "commitmentType")]
     pub commitment_type: BlindedCommitmentType,

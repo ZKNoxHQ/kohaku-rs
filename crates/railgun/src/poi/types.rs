@@ -10,8 +10,6 @@ use serde::{Deserialize, Serialize};
 use crate::{circuit::proof::Proof, crypto::railgun_txid::Txid, merkle_tree::MerkleRoot};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[cfg_attr(js, derive(tsify::Tsify))]
-#[cfg_attr(js, tsify(into_wasm_abi, from_wasm_abi, type = "string"))]
 pub struct ListKey(String);
 
 #[derive(Debug, Copy, Clone, PartialEq, Deserialize, Eq, Hash)]
@@ -26,8 +24,6 @@ pub enum TxidVersion {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(js, derive(tsify::Tsify))]
-#[cfg_attr(js, tsify(into_wasm_abi, from_wasm_abi))]
 pub enum BlindedCommitmentType {
     Shield,
     Transact,
@@ -35,8 +31,6 @@ pub enum BlindedCommitmentType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(js, derive(tsify::Tsify))]
-#[cfg_attr(js, tsify(into_wasm_abi, from_wasm_abi))]
 pub enum PoiStatus {
     Valid,
     ProofSubmitted,
