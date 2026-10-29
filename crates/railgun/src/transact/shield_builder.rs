@@ -1,5 +1,4 @@
-use alloy::{primitives::U256, sol_types::SolCall};
-use kohaku_eip_1193::tx_data::TxData;
+use alloy::{primitives::U256, rpc::types::TransactionRequest, sol_types::SolCall};
 use rand::CryptoRng;
 use thiserror::Error;
 
@@ -51,7 +50,7 @@ impl ShieldBuilder {
     }
 
     /// Builds the shield transaction. Shield txns must be self-broadcast
-    pub fn build(self, rng: &mut impl CryptoRng) -> Result<Vec<TxData>, ShieldError> {
+    pub fn build(self, rng: &mut impl CryptoRng) -> Result<Vec<TransactionRequest>, ShieldError> {
         // We return multiple txns here rather than using the RelayAdapt multicall for
         // all shields. This is because when calling the RailgunSmartWallet to shield,
         // it assumes that the caller (msg.sender) holds the assets & has approved
@@ -74,11 +73,12 @@ impl ShieldBuilder {
                 _shieldRequests: shields,
             };
 
-            txns.push(TxData {
-                to: self.chain.railgun_smart_wallet,
-                data: call.abi_encode().into(),
-                value: U256::ZERO,
-            });
+            txns.push(
+                TransactionRequest::default()
+                    .to(self.chain.railgun_smart_wallet)
+                    .input(call.abi_encode().into())
+                    .value(U256::ZERO),
+            );
         }
 
         if !self.native_shields.is_empty() {
@@ -116,11 +116,12 @@ impl ShieldBuilder {
                 _calls: calls,
             };
 
-            txns.push(TxData {
-                to: relay,
-                data: multicall.abi_encode().into(),
-                value: U256::from(native_total),
-            });
+            txns.push(
+                TransactionRequest::default()
+                    .to(relay)
+                    .input(multicall.abi_encode().into())
+                    .value(U256::from(native_total)),
+            );
         }
 
         Ok(txns)
@@ -129,7 +130,7 @@ impl ShieldBuilder {
 
 #[cfg(all(test, native))]
 mod tests {
-    use alloy::primitives::Address;
+    use alloy::primitives::{Address, Bytes, TxKind};
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaChaRng;
 
@@ -138,6 +139,19 @@ mod tests {
         account::signer::{PrivateKeySigner, RailgunSigner},
         crypto::keys::{SpendingKey, ViewingKey},
     };
+
+    /// The fields a shield transaction sets: a request's other fields are all unset.
+    fn essentials(txns: &[TransactionRequest]) -> Vec<(TxKind, Bytes, U256)> {
+        txns.iter()
+            .map(|tx| {
+                (
+                    tx.to.expect("to"),
+                    tx.input.input().cloned().expect("input"),
+                    tx.value.expect("value"),
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn test_shield_builder() {
@@ -155,7 +169,7 @@ mod tests {
             .build(&mut rng)
             .unwrap();
 
-        insta::assert_debug_snapshot!(shield_request);
+        insta::assert_debug_snapshot!(essentials(&shield_request));
     }
 
     #[test]
@@ -171,6 +185,6 @@ mod tests {
             .build(&mut rng)
             .unwrap();
 
-        insta::assert_debug_snapshot!(tx);
+        insta::assert_debug_snapshot!(essentials(&tx));
     }
 }

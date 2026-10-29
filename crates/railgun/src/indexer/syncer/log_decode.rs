@@ -1,5 +1,4 @@
-use alloy::sol_types::SolEvent;
-use kohaku_eip_1193::provider::RawLog;
+use alloy::{rpc::types::Log, sol_types::SolEvent};
 
 use crate::{
     abis::railgun::RailgunSmartWallet,
@@ -14,11 +13,11 @@ pub enum LogDecodeError {
     Parse(String),
 }
 
-/// Decodes a raw log emitted by the RailgunSmartWallet into zero or more
-/// [`SyncEvent`]s. Shared between any syncer that fetches raw logs (RPC, and
+/// Decodes a log emitted by the RailgunSmartWallet into zero or more
+/// [`SyncEvent`]s. Shared between any syncer that fetches logs (RPC, and
 /// any host-supplied external syncer) rather than pre-decoded events.
-pub fn log_to_sync_events(log: RawLog) -> Result<Vec<SyncEvent>, LogDecodeError> {
-    let Some(topic0) = log.topics.get(0).cloned() else {
+pub fn log_to_sync_events(log: Log) -> Result<Vec<SyncEvent>, LogDecodeError> {
+    let Some(topic0) = log.topics().first().copied() else {
         return Err(LogDecodeError::Parse(format!(
             "Log missing topic0: {:?}",
             log
@@ -49,8 +48,8 @@ pub fn log_to_sync_events(log: RawLog) -> Result<Vec<SyncEvent>, LogDecodeError>
     }
 }
 
-fn handle_shield_event(log: &RawLog, block_number: u64) -> Result<Vec<SyncEvent>, LogDecodeError> {
-    let event = RailgunSmartWallet::Shield::decode_log(&log.clone().into())?;
+fn handle_shield_event(log: &Log, block_number: u64) -> Result<Vec<SyncEvent>, LogDecodeError> {
+    let event = RailgunSmartWallet::Shield::decode_log(&log.inner)?;
 
     let tree_number = event.treeNumber.saturating_to();
     let start_position = event.startPosition.saturating_to::<u32>();
@@ -80,10 +79,10 @@ fn handle_shield_event(log: &RawLog, block_number: u64) -> Result<Vec<SyncEvent>
 }
 
 fn handle_transact_event(
-    log: &RawLog,
+    log: &Log,
     block_timestamp: u64,
 ) -> Result<Vec<SyncEvent>, LogDecodeError> {
-    let event = RailgunSmartWallet::Transact::decode_log(&log.clone().into())?;
+    let event = RailgunSmartWallet::Transact::decode_log(&log.inner)?;
 
     let tree_number = event.treeNumber.saturating_to();
     let start_position = event.startPosition.saturating_to::<u32>();
@@ -112,10 +111,10 @@ fn handle_transact_event(
 }
 
 fn handle_nullified_event(
-    log: &RawLog,
+    log: &Log,
     block_timestamp: u64,
 ) -> Result<Vec<SyncEvent>, LogDecodeError> {
-    let event = RailgunSmartWallet::Nullified::decode_log(&log.clone().into())?;
+    let event = RailgunSmartWallet::Nullified::decode_log(&log.inner)?;
 
     let tree_number = event.treeNumber as u32;
 

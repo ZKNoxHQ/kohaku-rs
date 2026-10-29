@@ -1,8 +1,8 @@
 use alloy::{
     primitives::{Address, U256},
+    rpc::types::TransactionRequest,
     sol_types::SolCall,
 };
-use kohaku_eip_1193::tx_data::TxData;
 
 use crate::{
     abis::{self, railgun::RailgunSmartWallet},
@@ -12,8 +12,8 @@ use crate::{
 
 /// A transaction that has been proven for railgun.
 pub struct ProvedTx {
-    /// Transaction data to execute this transaction on-chain in railgun.
-    pub tx_data: TxData,
+    /// The transaction request (to, calldata, value) that executes it on-chain in railgun.
+    pub tx_data: TransactionRequest,
     /// The operations included in this transaction alongside their proof data.
     pub proved_operations: Vec<ProvedOperation>,
 }
@@ -33,7 +33,10 @@ impl ProvedTx {
             _transactions: transactions,
         }
         .abi_encode();
-        let tx_data = TxData::new(railgun_smart_wallet, calldata.into(), U256::ZERO);
+        let tx_data = TransactionRequest::default()
+            .to(railgun_smart_wallet)
+            .input(calldata.into())
+            .value(U256::ZERO);
         Self {
             tx_data,
             proved_operations: operations,

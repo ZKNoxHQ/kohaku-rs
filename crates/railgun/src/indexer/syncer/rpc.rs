@@ -1,6 +1,8 @@
-use std::sync::Arc;
-
-use kohaku_eip_1193::provider::{Eip1193Error, Eip1193Provider, IntoEip1193Provider};
+use alloy::{
+    providers::{DynProvider, Provider},
+    rpc::types::Filter,
+    transports::{RpcError, TransportErrorKind},
+};
 use tracing::{info, warn};
 
 use crate::{
@@ -14,7 +16,7 @@ use crate::{
 /// SyncEvents.
 pub struct RpcSyncer {
     chain: ChainConfig,
-    provider: Arc<dyn Eip1193Provider>,
+    provider: DynProvider,
     batch_size: u64,
     batch_delay: web_time::Duration,
 }
@@ -22,14 +24,14 @@ pub struct RpcSyncer {
 #[derive(Debug, thiserror::Error)]
 enum RpcSyncerError {
     #[error("RPC error: {0}")]
-    RpcError(#[from] Eip1193Error),
+    RpcError(#[from] RpcError<TransportErrorKind>),
 }
 
 impl RpcSyncer {
-    pub fn new(chain: ChainConfig, provider: impl IntoEip1193Provider) -> Self {
+    pub fn new(chain: ChainConfig, provider: impl Provider + 'static) -> Self {
         Self {
             chain,
-            provider: provider.into_eip1193(),
+            provider: provider.erased(),
             batch_size: 10,
             batch_delay: web_time::Duration::from_millis(1000),
         }
@@ -78,15 +80,11 @@ impl RpcSyncer {
             let batch_start = current_from;
             let batch_end = to_block.min(current_from + self.batch_size - 1);
 
-            let logs = self
-                .provider
-                .logs(
-                    self.chain.railgun_smart_wallet,
-                    None,
-                    Some(batch_start),
-                    Some(batch_end),
-                )
-                .await?;
+            let filter = Filter::new()
+                .address(self.chain.railgun_smart_wallet)
+                .from_block(batch_start)
+                .to_block(batch_end);
+            let logs = self.provider.get_logs(&filter).await?;
             crate::common::sleep(self.batch_delay).await;
 
             for log in logs {

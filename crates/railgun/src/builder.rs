@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use kohaku_eip_1193::provider::{Eip1193Provider, IntoEip1193Provider};
+use alloy::providers::{DynProvider, Provider};
 
 use crate::{
     chain_config::ChainConfig,
@@ -18,7 +18,7 @@ use crate::{
 /// Builder for constructing a `RailgunProvider`.
 pub struct RailgunBuilder {
     chain: ChainConfig,
-    provider: Arc<dyn Eip1193Provider>,
+    provider: DynProvider,
     db: Option<RailgunState>,
     utxo_syncer: Option<Arc<dyn UtxoSyncer>>,
     poi: bool,
@@ -26,10 +26,10 @@ pub struct RailgunBuilder {
 
 impl RailgunBuilder {
     #[must_use]
-    pub fn new(chain: ChainConfig, provider: impl IntoEip1193Provider) -> Self {
+    pub fn new(chain: ChainConfig, provider: impl Provider + 'static) -> Self {
         Self {
             chain,
-            provider: provider.into_eip1193(),
+            provider: provider.erased(),
             db: None,
             utxo_syncer: None,
             poi: false,
