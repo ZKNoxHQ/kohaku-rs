@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "master" ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ "master", "feat/kohaku-railgun" ]
   workflow_call:
 
 env:
@@ -28,8 +28,12 @@ jobs:
     - run: nix develop .#ci --command bash -c "cd crates && cargo check --all-targets --all-features"
     - run: nix develop .#ci --command bash -c "cd crates && cargo clippy --all-targets --all-features"
     - run: nix develop .#ci --command bash -c "cd crates && cargo test --all-targets --all-features --release"
-    # Railgun ignored integration tests need RPC/dev-key secrets; run them in a dedicated workflow.
-    - run: nix develop .#ci --command bash -c "cd crates && cargo test --workspace --exclude kohaku-railgun --all-targets --all-features --release -- --ignored"
+    # Service-backed and separately provisioned POI tests remain opt-in.
+    - run: >-
+        nix develop .#ci --command bash -c
+        "cd crates && cargo test --workspace --tests --all-features --release -- --ignored
+        --skip sync_utxo::test_sync_utxo --skip sync_txid::test_sync_txid
+        --skip transact_poi::test_transact_poi --skip poi::provider::fresh_proof_tests::"
 
   test-wasm:
     runs-on: ubuntu-latest

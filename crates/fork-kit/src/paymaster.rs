@@ -1,7 +1,7 @@
 //! 4337 [PrivacyPaymaster](https://github.com/Robert-MacWha/privacy-paymaster) deployment and configuration.
 
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{Address, B256, U256},
     providers::DynProvider,
 };
 
@@ -17,6 +17,12 @@ mod sol {
         #[sol(rpc)]
         TornadoFeeAdapter,
         "fixtures/tornado_fee_adapter.json"
+    );
+    // https://etherscan.io/address/0xD73A1dE75B1D4A3aF1D9f664fBcFA327bD2Cd59d#code
+    sol!(
+        #[sol(rpc)]
+        RailgunFeeAdapter,
+        "fixtures/railgun/fee_adapter.json"
     );
 }
 
@@ -83,5 +89,26 @@ pub async fn deploy_fee_adapter(
         .get_receipt()
         .await?;
 
+    Ok(*adapter.address())
+}
+
+/// Deploys and approves a `RailgunFeeAdapter` for a local smart wallet and paymaster key.
+///
+/// # Errors
+/// Returns an error if deployment or paymaster approval fails.
+pub async fn deploy_railgun_fee_adapter(
+    provider: DynProvider,
+    paymaster: Address,
+    smart_wallet: Address,
+    master_public_key: B256,
+) -> Result<Address, anyhow::Error> {
+    let adapter =
+        sol::RailgunFeeAdapter::deploy(&provider, smart_wallet, master_public_key).await?;
+    sol::PrivacyPaymaster::new(paymaster, &provider)
+        .setApprovedAdapter(*adapter.address(), true)
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
     Ok(*adapter.address())
 }
