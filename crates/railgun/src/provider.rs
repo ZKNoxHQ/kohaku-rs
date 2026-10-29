@@ -2,9 +2,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use alloy::{
     primitives::{Address, B256, Bytes, U256},
+    providers::{DynProvider, Provider},
+    rpc::types::TransactionRequest,
     sol_types::SolCall,
+    transports::{RpcError, TransportErrorKind},
 };
-use kohaku_eip_1193::provider::{Eip1193Error, Eip1193Provider};
 use kohaku_userop_kit::{
     builder::UserOperationBuilder,
     bundler::{Bundler, BundlerError, BundlerExt},
@@ -134,7 +136,7 @@ fn txid_hex(txid: crate::crypto::railgun_txid::Txid) -> String {
 /// Interfaces with the RAILGUN protocol.
 pub struct RailgunProvider {
     chain: ChainConfig,
-    provider: Arc<dyn Eip1193Provider>,
+    provider: DynProvider,
     utxo_indexer: UtxoIndexer,
     prover: Groth16Prover,
     poi_provider: Option<PoiProvider>,
@@ -202,7 +204,7 @@ pub enum RailgunProviderError {
     #[error("Bundler error: {0}")]
     Bundler(#[from] BundlerError),
     #[error("RPC error: {0}")]
-    Rpc(#[from] Eip1193Error),
+    Rpc(#[from] RpcError<TransportErrorKind>),
     #[error(
         "gas limits fixed before proving are too low: {what} needs {needed}, limit is {limit}. \
          Nothing was sent"
@@ -221,7 +223,7 @@ pub enum RailgunProviderError {
 impl RailgunProvider {
     pub(crate) async fn new(
         chain: ChainConfig,
-        provider: Arc<dyn Eip1193Provider>,
+        provider: DynProvider,
         utxo_indexer: UtxoIndexer,
         prover: Groth16Prover,
         poi_provider: Option<PoiProvider>,
@@ -683,7 +685,7 @@ impl RailgunProvider {
         // Check the limits against the real proof before anything leaves.
         let pmv_limit = gas.paymaster_verification_gas_limit.unwrap_or(0);
         let pmv_measured =
-            estimate_paymaster_verification_gas_limit(self.provider.as_ref(), &signable).await?;
+            estimate_paymaster_verification_gas_limit(&self.provider, &signable).await?;
         if pmv_measured > pmv_limit {
             return Err(RailgunProviderError::LimitsTooLow {
                 what: "paymaster verification",
@@ -960,8 +962,7 @@ impl RailgunProvider {
             // Recalculate fee and check for convergence.
             info!("Prepared broadcast transaction: {:?}", signable);
             let estimated_paymaster_verification_gas_limit =
-                estimate_paymaster_verification_gas_limit(self.provider.as_ref(), &signable)
-                    .await?;
+                estimate_paymaster_verification_gas_limit(&self.provider, &signable).await?;
             info!(
                 "Estimated paymaster verification gas limit: {}",
                 estimated_paymaster_verification_gas_limit
@@ -1125,7 +1126,7 @@ fn is_fee_note(note: &Box<dyn Note>, fee_asset: AssetId, fee_value: u128) -> boo
 }
 
 async fn estimate_paymaster_verification_gas_limit(
-    provider: &dyn Eip1193Provider,
+    provider: &DynProvider,
     user_op: &SignableUserOperation,
 ) -> Result<u128, RailgunProviderError> {
     let entry_point = user_op.entry_point;
@@ -1133,7 +1134,7 @@ async fn estimate_paymaster_verification_gas_limit(
         return Ok(0);
     };
     let user_op = user_op.user_op.into_packed();
-    let data = abi::PrivacyPaymaster::validatePaymasterUserOpCall {
+    let data: Bytes = abi::PrivacyPaymaster::validatePaymasterUserOpCall {
         userOp: abi::PrivacyPaymaster::PackedUserOperation {
             sender: user_op.sender,
             nonce: user_op.nonce,
@@ -1151,9 +1152,11 @@ async fn estimate_paymaster_verification_gas_limit(
     .abi_encode()
     .into();
 
-    Ok(provider
-        .estimate_gas(paymaster, data, Some(entry_point))
-        .await? as u128)
+    let request = TransactionRequest::default()
+        .from(entry_point)
+        .to(paymaster)
+        .input(data.into());
+    Ok(provider.estimate_gas(request).await? as u128)
 }
 
 mod abi {

@@ -1,7 +1,9 @@
-use std::sync::Arc;
-
-use alloy::primitives::{Address, U256};
-use kohaku_eip_1193::provider::{Eip1193Caller, Eip1193Provider};
+use alloy::{
+    primitives::{Address, U256},
+    providers::{DynProvider, Provider},
+    rpc::types::TransactionRequest,
+    sol_types::SolCall,
+};
 
 use crate::{
     abis::railgun::RailgunSmartWallet,
@@ -11,11 +13,11 @@ use crate::{
 /// Verifies UTXO Merkle roots against the deployed `RailgunSmartWallet` contract.
 pub struct SmartWalletUtxoVerifier {
     address: Address,
-    provider: Arc<dyn Eip1193Provider>,
+    provider: DynProvider,
 }
 
 impl SmartWalletUtxoVerifier {
-    pub fn new(address: Address, provider: Arc<dyn Eip1193Provider>) -> Self {
+    pub fn new(address: Address, provider: DynProvider) -> Self {
         Self { address, provider }
     }
 }
@@ -30,15 +32,16 @@ impl MerkleTreeVerifier for SmartWalletUtxoVerifier {
         root: MerkleRoot,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync + 'static>> {
         let root: U256 = root.into();
-        Ok(self
-            .provider
-            .sol_call(
-                self.address,
-                RailgunSmartWallet::rootHistoryCall {
-                    treeNumber: U256::from(tree_number),
-                    root: root.into(),
-                },
-            )
-            .await?)
+        let call = RailgunSmartWallet::rootHistoryCall {
+            treeNumber: U256::from(tree_number),
+            root: root.into(),
+        };
+        let request = TransactionRequest::default()
+            .to(self.address)
+            .input(call.abi_encode().into());
+        let returned = self.provider.call(request).await?;
+        Ok(RailgunSmartWallet::rootHistoryCall::abi_decode_returns(
+            &returned,
+        )?)
     }
 }

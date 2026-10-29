@@ -5257,26 +5257,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kohaku-eip-1193"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "async-trait",
- "cfg_aliases",
- "gloo-timers",
- "hex",
- "js-sys",
- "serde",
- "serde-wasm-bindgen",
- "thiserror 2.0.20",
- "tokio",
- "tsify",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-time",
-]
-
-[[package]]
 name = "kohaku-fork-kit"
 version = "0.1.0"
 dependencies = [
@@ -5333,7 +5313,6 @@ dependencies = [
  "insta",
  "js-sys",
  "kohaku-crypto",
- "kohaku-eip-1193",
  "kohaku-fork-kit",
  "kohaku-merkle-tree",
  "kohaku-railgun",

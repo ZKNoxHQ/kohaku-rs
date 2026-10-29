@@ -15,7 +15,7 @@ path = "bin/main.rs"
 
 [features]
 default = []
-js = ["dep:tsify", "dep:wasm-bindgen", "kohaku-eip-1193/js"]
+js = ["dep:tsify", "dep:wasm-bindgen"]
 testing = []
 parallel = ["ark-groth16/parallel", "ark-ff/parallel", "ark-serialize/parallel"]
 bench = []
@@ -38,7 +38,6 @@ kohaku-merkle-tree = { workspace = true }
 ctr = { workspace = true }
 curve25519-dalek = { workspace = true }
 ed25519-dalek = { workspace = true }
-kohaku-eip-1193 = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
 num-bigint = { version = "0.4.6", features = ["serde"] }

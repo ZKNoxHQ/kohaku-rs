@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crypto",
-    "eip-1193",
     "fork-kit",
     "merkle-tree",
     "poseidon-rust",
@@ -54,7 +53,6 @@ insta = "1.48.0"
 itertools = "0.14.0"
 js-sys = "0.3.85"
 kohaku-crypto = { path = "crypto" }
-kohaku-eip-1193 = { path = "eip-1193" }
 kohaku-fork-kit = { path = "fork-kit" }
 kohaku-merkle-tree = { path = "merkle-tree" }
 kohaku-railgun = { path = "railgun" }

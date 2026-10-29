@@ -1062,9 +1062,9 @@ mod submission_control_tests {
                 .any(|(_, status)| *status == PoiStatus::Unavailable)
         );
 
-        let rpc = Arc::new(kohaku_eip_1193::alloy::Alloy::new(
+        let rpc = alloy::providers::Provider::erased(
             alloy::providers::ProviderBuilder::new().connect_http(url.parse().unwrap()),
-        ));
+        );
         let chain = crate::chain_config::ChainConfig::sepolia();
         let utxo = crate::indexer::utxo_indexer::UtxoIndexer::new(
             db.clone(),
@@ -1140,9 +1140,9 @@ mod submission_control_tests {
         .unwrap();
         provider.inner.pending.push(entry);
 
-        let rpc = Arc::new(kohaku_eip_1193::alloy::Alloy::new(
+        let rpc = alloy::providers::Provider::erased(
             alloy::providers::ProviderBuilder::new().connect_http(url.parse().unwrap()),
-        ));
+        );
         let chain = crate::chain_config::ChainConfig::sepolia();
         let utxo = crate::indexer::utxo_indexer::UtxoIndexer::new(
             db.clone(),
