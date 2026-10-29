@@ -30,10 +30,11 @@ use crate::{
     note::Note,
     poi::{
         provider::{PoiProvider, PoiProviderError},
-        types::{BlindedCommitmentType, PoiStatus},
+        types::{BlindedCommitmentType, ListKey, OperationPoi, PoiStatus},
     },
     transact::{
-        AmountError, AmountIntents, ShieldBuilder, Spend, SpendError, attach_fee, prove_operations,
+        AmountError, AmountIntents, ShieldBuilder, Spend, SpendError, attach_broadcaster_fee,
+        attach_fee, prove_operations,
         proved_transaction::{ProvedOperation, ProvedTx},
         verifier_override::verifier_state_override,
     },
@@ -213,6 +214,8 @@ pub enum RailgunProviderError {
     },
     #[error("Privacy Paymaster not configured for chain: {0}")]
     PrivacyPaymasterNotConfigured(u64),
+    #[error("POI is not enabled on this provider")]
+    PoiDisabled,
     #[error("Other: {0}")]
     Other(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -513,6 +516,33 @@ impl RailgunProvider {
         spendable.explain(resolved)
     }
 
+    /// Adds the fee note of a Railgun broadcaster to `spends`, as the first commitment of the
+    /// first operation, which is the only one broadcasters look at. The fee is selected from
+    /// the spendable notes like a paymaster fee; it has to fit in a single UTXO tree. Set
+    /// [`Spend::min_gas_price`] on every returned spend before proving, the contract checks it
+    /// per transaction.
+    pub async fn attach_broadcaster_fee(
+        &mut self,
+        spends: &[Spend],
+        fee_payer: Arc<dyn RailgunSigner>,
+        fee_to: RailgunAddress,
+        fee_asset: AssetId,
+        fee: u128,
+        rng: &mut impl CryptoRng,
+    ) -> Result<Vec<Spend>, RailgunProviderError> {
+        let spendable = self.spendable_notes().await;
+        let with_fee = attach_broadcaster_fee(
+            spends,
+            fee_payer,
+            fee_to,
+            fee_asset,
+            fee,
+            &spendable.notes,
+            rng,
+        );
+        spendable.explain(with_fee)
+    }
+
     /// Forgets the pending POI proofs of operations that never reached the chain, for instance
     /// after the submitter did not answer. Returns how many entries were dropped. Entries of
     /// operations that are never mined are also dropped automatically during sync, once the
@@ -540,6 +570,25 @@ impl RailgunProvider {
     ) -> Result<ProvedTx, RailgunProviderError> {
         let operations = self.prove_spends(spends, rng, false).await?;
         Ok(ProvedTx::new(self.chain.railgun_smart_wallet, operations))
+    }
+
+    /// Proves the POI of a built operation for every list key, with its outputs at
+    /// `utxo_tree_out` and `txid_proof` as the inclusion proof of its txid leaf. For a
+    /// pre-transaction POI, pass [`UtxoTreeIndex::pre_inclusion`] and a proof of the leaf
+    /// `TxidLeafHash::new(Txid::from_operation(op), op.inner.utxo_tree_number, pre_inclusion)`.
+    /// Fails when POI is not enabled.
+    pub async fn prove_operation_pois(
+        &self,
+        operation: &ProvedOperation,
+        utxo_tree_out: crate::merkle_tree::UtxoTreeIndex,
+        txid_proof: crate::merkle_tree::MerkleProof,
+    ) -> Result<Vec<(ListKey, OperationPoi)>, RailgunProviderError> {
+        let Some(poi_provider) = &self.poi_provider else {
+            return Err(RailgunProviderError::PoiDisabled);
+        };
+        Ok(poi_provider
+            .prove_operation_pois(&self.prover, operation, utxo_tree_out, txid_proof)
+            .await?)
     }
 
     /// Prove spends into one Railgun transaction.

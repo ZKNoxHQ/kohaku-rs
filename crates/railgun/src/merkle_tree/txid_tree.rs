@@ -142,6 +142,26 @@ impl UtxoTreeIndex {
         UtxoTreeIndex::UnshieldOnly
     }
 
+    /// Tree number and index of the first output: the real one once included, the values the
+    /// Railgun engine hardcodes otherwise. Blinded commitments of the outputs are computed at
+    /// this position.
+    pub fn position(&self) -> (u32, u32) {
+        match self {
+            UtxoTreeIndex::Included {
+                tree_number,
+                start_index,
+            } => (*tree_number, *start_index),
+            UtxoTreeIndex::PreInclusion => (
+                GLOBAL_UTXO_TREE_PRE_TRANSACTION_POI_PROOF_HARDCODED_VALUE as u32,
+                GLOBAL_UTXO_POSITION_PRE_TRANSACTION_POI_PROOF_HARDCODED_VALUE as u32,
+            ),
+            UtxoTreeIndex::UnshieldOnly => (
+                GLOBAL_UTXO_TREE_UNSHIELD_EVENT_HARDCODED_VALUE as u32,
+                GLOBAL_UTXO_POSITION_UNSHIELD_EVENT_HARDCODED_VALUE as u32,
+            ),
+        }
+    }
+
     pub fn global_index(&self) -> u64 {
         let (tree_number, start_index) = match self {
             UtxoTreeIndex::Included {
@@ -159,5 +179,26 @@ impl UtxoTreeIndex {
         };
 
         tree_number * (TOTAL_LEAVES as u64) + start_index
+    }
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    #[test]
+    fn position_agrees_with_global_index() {
+        for index in [
+            UtxoTreeIndex::included(3, 1234),
+            UtxoTreeIndex::pre_inclusion(),
+            UtxoTreeIndex::unshield_only(),
+        ] {
+            let (tree, start) = index.position();
+            assert_eq!(
+                tree as u64 * TOTAL_LEAVES as u64 + start as u64,
+                index.global_index()
+            );
+        }
+        assert_eq!(UtxoTreeIndex::pre_inclusion().position(), (199_999, 199_999));
     }
 }

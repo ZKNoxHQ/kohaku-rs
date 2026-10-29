@@ -46,6 +46,7 @@ pub struct Spend {
     finalized: bool,
     adapt_contract: Option<Address>,
     adapt_params: Option<[u8; 32]>,
+    min_gas_price: u128,
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +129,7 @@ impl Spend {
             finalized: false,
             adapt_contract: None,
             adapt_params: None,
+            min_gas_price: 0,
         })
     }
 
@@ -169,6 +171,15 @@ impl Spend {
     pub fn adapt(mut self, contract: Address, params: [u8; 32]) -> Self {
         self.adapt_contract = Some(contract);
         self.adapt_params = Some(params);
+        self
+    }
+
+    /// Sets `BoundParams.minGasPrice`. The Railgun contract rejects the transaction when
+    /// `tx.gasprice` is lower, which is how a broadcaster is held to the price the fee was
+    /// computed for. Leave at 0 (the default) for any other submitter, in particular ERC-4337
+    /// bundlers, whose gas price is not known when the proof is made.
+    pub fn min_gas_price(mut self, wei: u128) -> Self {
+        self.min_gas_price = wei;
         self
     }
 
@@ -265,10 +276,12 @@ impl Spend {
     }
 
     /// Add extra inputs and one transfer, then rebuild change so the spend still balances.
+    /// With `first`, the transfer leads the outputs instead of following them.
     pub(crate) fn absorb(
         &mut self,
         extra_inputs: Vec<UtxoNote>,
         transfer: TransferNote,
+        first: bool,
         rng: &mut impl CryptoRng,
     ) -> Result<(), SpendError> {
         if !self.finalized {
@@ -290,7 +303,11 @@ impl Spend {
         if self.inputs.len() > 13 {
             return Err(SpendError::TooManyInputs(self.inputs.len()));
         }
-        self.outputs.push(transfer);
+        if first {
+            self.outputs.insert(0, transfer);
+        } else {
+            self.outputs.push(transfer);
+        }
         self.rebuild_change(rng)?;
         self.clone().into_operation()?;
         Ok(())
@@ -316,6 +333,7 @@ impl Spend {
         );
         operation.adapt_contract = self.adapt_contract;
         operation.adapt_params = self.adapt_params;
+        operation.min_gas_price = self.min_gas_price;
         operation.verify()?;
         Ok(operation)
     }
@@ -388,10 +406,11 @@ async fn prove_operation(
         .map(|n| n.encrypt(rng))
         .collect::<Result<_, _>>()?;
 
-    // min_gas_price, adapt_contract, and adapt_input are vestigial fields for railgun relayers.
+    // min_gas_price, adapt_contract and adapt_params are bound into the proof and checked by
+    // the Railgun contract (`tx.gasprice >= minGasPrice`, `adaptContract == msg.sender`).
     let bound_params = abis::railgun::BoundParams::new(
         utxo_tree.number() as u16,
-        0,
+        operation.min_gas_price,
         unshield_type,
         chain_id,
         operation.adapt_contract.unwrap_or(Address::ZERO),
@@ -660,5 +679,39 @@ mod tests {
         assert_eq!(tx.nullifiers.len(), 1);
         assert_eq!(tx.commitments.len(), 2);
         assert_eq!(tx.boundParams.commitmentCiphertext.len(), 2);
+    }
+
+    /// `minGasPrice` is part of the proven bound params: 0 unless set.
+    #[test]
+    fn min_gas_price_is_bound() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let notes = [note(&me, 0, 0, WETH, 100)];
+        let trees = tree_with(&notes, 0);
+        let mut rng = rand::rng();
+        let spend = Spend::try_new(me, notes.to_vec())
+            .unwrap()
+            .transfer(other.address(), 30, "")
+            .unwrap()
+            .with_change(&mut rng)
+            .unwrap();
+        let default = spend.clone().into_operation().unwrap();
+        let priced = spend.min_gas_price(1_000_000_000).into_operation().unwrap();
+        assert_eq!(default.min_gas_price, 0);
+        assert_eq!(priced.min_gas_price, 1_000_000_000);
+
+        let dummy = block_on(prove_operations(
+            None,
+            &trees,
+            1,
+            &[default, priced],
+            &mut rng,
+        ))
+        .unwrap();
+        assert_eq!(dummy[0].transaction.boundParams.minGasPrice.to::<u128>(), 0);
+        assert_eq!(
+            dummy[1].transaction.boundParams.minGasPrice.to::<u128>(),
+            1_000_000_000
+        );
     }
 }

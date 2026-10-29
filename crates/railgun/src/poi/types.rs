@@ -139,6 +139,19 @@ pub struct TransactProofData {
     pub railgun_txid_if_has_unshield: Txid,
 }
 
+/// POI proof of one operation for one list, with the public values a POI node or a broadcaster
+/// checks it against. See `RailgunProvider::prove_operation_pois`.
+#[derive(Debug, Clone)]
+pub struct OperationPoi {
+    pub proof: Proof,
+    /// Root of the txid inclusion proof the proof was made with.
+    pub txid_merkleroot: MerkleRoot,
+    pub poi_merkleroots: Vec<MerkleRoot>,
+    /// Blinded commitments of the outputs at the position the proof was made for.
+    pub blinded_commitments_out: Vec<BlindedCommitment>,
+    pub railgun_txid_if_has_unshield: Txid,
+}
+
 impl ValidatedRailgunTxidStatus {
     pub fn tree(&self) -> u32 {
         (self.index >> 16) as u32

@@ -170,12 +170,81 @@ pub(crate) fn attach_fee(
     adapt_params: [u8; 32],
     rng: &mut impl CryptoRng,
 ) -> Result<Vec<Spend>, AmountError> {
+    let fee_note = TransferNote::new(
+        fee_payer.viewing_key(),
+        fee_to,
+        fee_asset,
+        fee,
+        rng.random(),
+        "fee",
+    );
+    let (spends, _) = place_fee(
+        spends,
+        fee_payer,
+        fee_asset,
+        fee,
+        fee_note,
+        available,
+        Some((adapt_contract, adapt_params)),
+        false,
+        rng,
+    )?;
+    Ok(spends)
+}
+
+/// Add the fee note of a Railgun broadcaster to an existing batch of spends.
+///
+/// Broadcasters only look at `transactions[0].commitments[0]`, so unlike [`attach_fee`] the
+/// note is guaranteed to come first: it leads the outputs of its spend, and that spend leads
+/// the batch. The fee is placed like a paymaster fee otherwise, so it has to fit in the
+/// notes of a single UTXO tree.
+pub(crate) fn attach_broadcaster_fee(
+    spends: &[Spend],
+    fee_payer: Arc<dyn RailgunSigner>,
+    fee_to: RailgunAddress,
+    fee_asset: AssetId,
+    fee: u128,
+    available: &[UtxoNote],
+    rng: &mut impl CryptoRng,
+) -> Result<Vec<Spend>, AmountError> {
+    let fee_note = TransferNote::new(
+        fee_payer.viewing_key(),
+        fee_to,
+        fee_asset,
+        fee,
+        rng.random(),
+        "",
+    );
+    let (mut spends, fee_spend) = place_fee(
+        spends, fee_payer, fee_asset, fee, fee_note, available, None, true, rng,
+    )?;
+    let fee_spend = spends.remove(fee_spend);
+    spends.insert(0, fee_spend);
+    Ok(spends)
+}
+
+/// Places `fee_note` in the batch and returns the index of the spend holding it. See
+/// [`attach_fee`] for the choice of spend; `first` makes the note lead that spend's outputs.
+#[allow(clippy::too_many_arguments)]
+fn place_fee(
+    spends: &[Spend],
+    fee_payer: Arc<dyn RailgunSigner>,
+    fee_asset: AssetId,
+    fee: u128,
+    fee_note: TransferNote,
+    available: &[UtxoNote],
+    adapt: Option<(Address, [u8; 32])>,
+    first: bool,
+    rng: &mut impl CryptoRng,
+) -> Result<(Vec<Spend>, usize), AmountError> {
     let mut spends = spends.to_vec();
     for spend in &mut spends {
         if !spend.is_finalized() {
             return Err(SpendError::NotFinalized.into());
         }
-        spend.set_adapt(adapt_contract, adapt_params);
+        if let Some((contract, params)) = adapt {
+            spend.set_adapt(contract, params);
+        }
     }
 
     let viewing = fee_payer.viewing_key().public_key();
@@ -233,26 +302,19 @@ pub(crate) fn attach_fee(
         });
     };
 
-    let fee_note = TransferNote::new(
-        fee_payer.viewing_key(),
-        fee_to,
-        fee_asset,
-        fee,
-        rng.random(),
-        "fee",
-    );
-
-    if let Some(spend) = spends.iter_mut().find(|spend| {
+    let index = if let Some(index) = spends.iter().position(|spend| {
         spend.tree() == tree
             && spend.asset() == fee_asset
             && spend.signer().address() == fee_payer.address()
     }) {
+        let spend = &mut spends[index];
         let need = fee.saturating_sub(spend.change_value());
         let extra = select_notes(slice_at(&unused, tree), need)
             .into_iter()
             .cloned()
             .collect();
-        spend.absorb(extra, fee_note, rng)?;
+        spend.absorb(extra, fee_note, first, rng)?;
+        index
     } else {
         spends.push(open_fee_spend(
             fee_payer,
@@ -260,12 +322,13 @@ pub(crate) fn attach_fee(
             fee,
             fee_note,
             slice_at(&unused, tree),
-            (adapt_contract, adapt_params),
+            adapt,
             rng,
         )?);
-    }
+        spends.len() - 1
+    };
 
-    Ok(spends)
+    Ok((spends, index))
 }
 
 fn build_group(
@@ -349,7 +412,7 @@ fn open_fee_spend(
     fee: u128,
     fee_note: TransferNote,
     notes: &[&UtxoNote],
-    adapt: (Address, [u8; 32]),
+    adapt: Option<(Address, [u8; 32])>,
     rng: &mut impl CryptoRng,
 ) -> Result<Spend, AmountError> {
     let inputs: Vec<UtxoNote> = select_notes(notes, fee).into_iter().cloned().collect();
@@ -374,8 +437,7 @@ fn open_fee_spend(
     } else {
         None
     };
-    Spend::from_selected(fee_payer, inputs, vec![fee_note], None, change, Some(adapt))
-        .map_err(Into::into)
+    Spend::from_selected(fee_payer, inputs, vec![fee_note], None, change, adapt).map_err(Into::into)
 }
 
 fn split_intent(
@@ -611,5 +673,110 @@ mod tests {
                 .iter()
                 .any(|spend| spend.tree() == 1 && spend.unshield_note().is_some())
         );
+    }
+
+    const USDC: AssetId = AssetId::Erc20(address!("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"));
+
+    fn out_values(spend: &Spend) -> Vec<u128> {
+        spend
+            .clone()
+            .into_operation()
+            .unwrap()
+            .out_notes()
+            .iter()
+            .map(|note| note.value())
+            .collect()
+    }
+
+    /// The broadcaster fee is the first commitment of the first operation whatever the other
+    /// spends are, and the rest of the batch keeps its order.
+    #[test]
+    fn a_broadcaster_fee_leads_the_batch() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let broadcaster = PrivateKeySigner::new_evm(random(), random(), 1);
+        let notes = [
+            note(&me, 0, 0, 100),
+            UtxoNote::new(
+                0,
+                1,
+                me.clone(),
+                USDC,
+                1_000,
+                random(),
+                "",
+                BlindedCommitmentType::Shield,
+            ),
+        ];
+
+        // USDC sorts before WETH in the group map: without the hook the fee would be buried.
+        assert!(USDC < WETH);
+        let spends = AmountIntents::new()
+            .transfer(me.clone(), other.address(), USDC, 500, "")
+            .transfer(me.clone(), other.address(), WETH, 5, "")
+            .resolve(&notes, &mut rand::rng())
+            .unwrap();
+        assert_eq!(spends[0].asset(), USDC);
+
+        let with_fee = attach_broadcaster_fee(
+            &spends,
+            me,
+            broadcaster.address(),
+            WETH,
+            25,
+            &notes,
+            &mut rand::rng(),
+        )
+        .unwrap();
+        assert_eq!(with_fee.len(), 2);
+        assert_eq!(with_fee[0].asset(), WETH);
+        assert_eq!(out_values(&with_fee[0]), vec![25, 5, 70]);
+        assert_eq!(with_fee[0].transfers()[0].to, broadcaster.address());
+        assert_eq!(with_fee[1].asset(), USDC);
+    }
+
+    /// A tree that cannot pay the fee is left alone: the fee opens the tree that can, and that
+    /// new spend moves to the front. A fee no single tree covers is refused: it is one note.
+    #[test]
+    fn a_broadcaster_fee_opens_the_tree_that_can_pay_it() {
+        let me = PrivateKeySigner::new_evm(random(), random(), 1);
+        let other = PrivateKeySigner::new_evm(random(), random(), 1);
+        let broadcaster = PrivateKeySigner::new_evm(random(), random(), 1);
+        let notes = [note(&me, 0, 0, 10), note(&me, 1, 0, 100)];
+        let spends = AmountIntents::new()
+            .transfer(me.clone(), other.address(), WETH, 8, "")
+            .resolve(&notes, &mut rand::rng())
+            .unwrap();
+        assert_eq!(spends[0].tree(), 0);
+
+        let with_fee = attach_broadcaster_fee(
+            &spends,
+            me.clone(),
+            broadcaster.address(),
+            WETH,
+            25,
+            &notes,
+            &mut rand::rng(),
+        )
+        .unwrap();
+        assert_eq!(with_fee.len(), 2);
+        assert_eq!(with_fee[0].tree(), 1);
+        assert_eq!(out_values(&with_fee[0]), vec![25, 75]);
+        assert_eq!(with_fee[1].tree(), 0);
+
+        // 15 is only reachable by combining the two trees.
+        let split = attach_broadcaster_fee(
+            &[],
+            me.clone(),
+            broadcaster.address(),
+            WETH,
+            15,
+            &[note(&me, 0, 0, 10), note(&me, 1, 0, 10)],
+            &mut rand::rng(),
+        );
+        assert!(matches!(
+            split,
+            Err(AmountError::InsufficientBalance { value: 15, .. })
+        ));
     }
 }
