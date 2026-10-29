@@ -16,8 +16,6 @@ use crate::{
 /// optional advisory chain ID.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-#[cfg_attr(js, derive(tsify::Tsify))]
-#[cfg_attr(js, tsify(from_wasm_abi, into_wasm_abi, type = "`0zk${string}`"))]
 pub struct RailgunAddress {
     master_key: MasterPublicKey,
     viewing_pubkey: ViewingPublicKey,

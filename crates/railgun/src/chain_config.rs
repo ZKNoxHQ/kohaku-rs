@@ -5,18 +5,14 @@ use crate::poi::types::ListKey;
 
 /// Chain Configurations
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(js, derive(tsify::Tsify))]
-#[cfg_attr(js, tsify(into_wasm_abi, from_wasm_abi))]
 #[serde(rename_all = "camelCase")]
 pub struct ChainConfig {
     /// EIP-155 Chain ID
-    #[cfg_attr(js, tsify(type = "number"))]
     pub id: ChainId,
     /// Railgun Smart Wallet Address on this chain
     ///
     /// Sourced from
     /// <https://docs.railgun.org/wiki/learn/helpful-links>
-    #[cfg_attr(js, tsify(type = "`0x${string}`"))]
     pub railgun_smart_wallet: Address,
     /// Unshield fee in basis points (bps).
     pub unshield_fee_bps: u16,
@@ -24,11 +20,9 @@ pub struct ChainConfig {
     ///
     /// Sourced from
     /// <https://github.com/Railgun-Community/shared-models/blob/main/src/models/network-config.ts>
-    #[cfg_attr(js, tsify(type = "`0x${string}`"))]
     pub relay_adapt_contract: Address,
     /// Wrapped base token (e.g. WETH on Ethereum) used in shield note preimages when shielding
     /// native ETH
-    #[cfg_attr(js, tsify(type = "`0x${string}`"))]
     pub wrapped_base_token: Address,
     /// Block number the railgun smart wallet was deployed at
     pub deployment_block: u64,

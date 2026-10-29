@@ -9,18 +9,10 @@ use crate::abis::railgun::{TokenData, TokenType};
 /// CAIP-10 style Asset ID.  ERC721 and ERC1155 sub-id represented as hex strings.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
-#[cfg_attr(js, derive(tsify::Tsify))]
-#[cfg_attr(js, tsify(into_wasm_abi, from_wasm_abi))]
 pub enum AssetId {
-    Erc20(#[cfg_attr(js, tsify(type = "`0x${string}`"))] Address),
-    Erc721(
-        #[cfg_attr(js, tsify(type = "`0x${string}`"))] Address,
-        #[cfg_attr(js, tsify(type = "`0x${string}`"))] U256,
-    ),
-    Erc1155(
-        #[cfg_attr(js, tsify(type = "`0x${string}`"))] Address,
-        #[cfg_attr(js, tsify(type = "`0x${string}`"))] U256,
-    ),
+    Erc20(Address),
+    Erc721(Address, U256),
+    Erc1155(Address, U256),
 }
 
 impl AssetId {
