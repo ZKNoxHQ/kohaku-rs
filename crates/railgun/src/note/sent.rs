@@ -13,9 +13,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     account::signer::RailgunSigner,
-    crypto::keys::{BlindedKey, ByteKey, U256Key},
+    crypto::keys::U256Key,
     indexer::syncer,
-    note::utxo::NoteError,
+    note::{
+        encrypt::{DecryptError, decrypt_transact_as_sender},
+        utxo::NoteError,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,28 +40,15 @@ impl SentNote {
         signer: &Arc<dyn RailgunSigner>,
         transact: &syncer::Transact,
     ) -> Result<Option<Self>, NoteError> {
-        let blinded_receiver = BlindedKey::from_bytes(transact.blinded_receiver_viewing_key);
-        let shared_key = signer
-            .viewing_key()
-            .derive_shared_key_blinded(blinded_receiver)?;
-
-        // iv (16) | tag (16), encoded master public key (32), token hash (32),
-        // random (16) | value (16), memo
-        let bundle = shared_key.decrypt_gcm(&transact.ciphertext)?;
-        if bundle.len() < 3
-            || bundle[0].len() != 32
-            || bundle[1].len() != 32
-            || bundle[2].len() != 32
-        {
-            return Ok(None);
-        }
-
-        let encoded_mpk = U256::from_be_slice(&bundle[0]);
-        let token_hash = U256::from_be_slice(&bundle[1]);
-        let random = U256::from_be_slice(&bundle[2][..16]);
-        let mut value_bytes = [0u8; 16];
-        value_bytes.copy_from_slice(&bundle[2][16..]);
-        let value = u128::from_be_bytes(value_bytes);
+        let plaintext = match decrypt_transact_as_sender(signer.as_ref(), transact) {
+            Ok(plaintext) => plaintext,
+            Err(DecryptError::Malformed) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let encoded_mpk = U256::from_be_slice(&plaintext.encoded_master_key);
+        let token_hash = U256::from_be_slice(&plaintext.token_hash);
+        let random = U256::from_be_slice(&plaintext.random);
+        let value = plaintext.value;
 
         // The Railgun engine stores receiver XOR sender unless the sender is hidden; kohaku
         // stores the receiver key as is. The commitment hash tells which one applies.

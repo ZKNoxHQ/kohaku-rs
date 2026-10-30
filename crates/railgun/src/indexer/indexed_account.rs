@@ -126,7 +126,7 @@ impl IndexedAccount {
         let note = UtxoNote::decrypt_transact(self.signer.clone(), &event);
 
         let note = match note {
-            Err(NoteError::Aes(_)) => {
+            Err(NoteError::Decrypt(_)) => {
                 // Not addressed to us. It may still be one of our own outputs.
                 if let Ok(Some(sent)) = SentNote::decrypt(&self.signer, event) {
                     debug!(

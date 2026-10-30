@@ -15,13 +15,16 @@ use crate::{
     crypto::{
         aes::AesError,
         keys::{
-            BlindedKey, ByteKey, KeyError, MasterPublicKey, NullifyingKey, SpendingPublicKey,
-            U256Key, ViewingPublicKey,
+            ByteKey, KeyError, MasterPublicKey, NullifyingKey, SpendingPublicKey, U256Key,
+            ViewingPublicKey,
         },
     },
     indexer::syncer,
     merkle_tree::UtxoLeafHash,
-    note::Note,
+    note::{
+        Note,
+        encrypt::{DecryptError, decrypt_transact_as_receiver},
+    },
     poi::types::BlindedCommitmentType,
 };
 
@@ -55,6 +58,8 @@ pub enum NoteError {
     TokenData(#[from] TokenDataError),
     #[error("Key error: {0}")]
     Key(#[from] KeyError),
+    #[error("Decryption error: {0}")]
+    Decrypt(#[from] DecryptError),
 }
 
 impl UtxoNote {
@@ -102,39 +107,18 @@ impl UtxoNote {
         signer: Arc<dyn RailgunSigner>,
         transact: &syncer::Transact,
     ) -> Result<Self, NoteError> {
-        let blinded_sender = BlindedKey::from_bytes(transact.blinded_sender_viewing_key);
-        let shared_key = signer
-            .viewing_key()
-            .derive_shared_key_blinded(blinded_sender)?;
-
-        // iv (16) | tag (16)
-        // token_hash (32)
-        // random (16) | value (16)
-        // memo (optional)
-        let bundle = shared_key.decrypt_gcm(&transact.ciphertext)?;
-        let token_data = TokenData::from_hash(&bundle[1])?;
+        let plaintext = decrypt_transact_as_receiver(signer.as_ref(), transact)?;
+        let token_data = TokenData::from_hash(&plaintext.token_hash)?;
         let asset_id = AssetId::from(token_data);
-
-        let mut random = [0u8; 16];
-        random.copy_from_slice(&bundle[2][..16]);
-
-        let mut value_bytes = [0u8; 16];
-        value_bytes.copy_from_slice(&bundle[2][16..]);
-        let value = u128::from_be_bytes(value_bytes);
-
-        let memo = if bundle.len() > 3 {
-            std::str::from_utf8(&bundle[3]).unwrap_or("")
-        } else {
-            ""
-        };
+        let memo = std::str::from_utf8(&plaintext.memo).unwrap_or("");
 
         Ok(UtxoNote::new(
             transact.tree_number,
             transact.leaf_index,
             signer,
             asset_id,
-            value,
-            random,
+            plaintext.value,
+            plaintext.random,
             memo,
             BlindedCommitmentType::Transact,
         ))

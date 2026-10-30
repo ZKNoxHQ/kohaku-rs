@@ -282,6 +282,13 @@ impl ViewingKey {
         NullifyingKey::new(*self)
     }
 
+    /// The ML-KEM key pair of an account that derives it from its viewing key, so that it
+    /// exists wherever the viewing key does (raw keys, hardware wallets, view-only access).
+    /// Same trust class: the viewing key already reads every note of the account.
+    pub fn kem_key_pair(&self) -> crate::crypto::kem::KemKeyPair {
+        crate::crypto::kem::KemKeyPair::derive(&self.0)
+    }
+
     pub(crate) fn derive_shared_key(
         &self,
         their_public: ViewingPublicKey,
