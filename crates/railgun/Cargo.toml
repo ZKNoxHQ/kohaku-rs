@@ -38,6 +38,7 @@ ed25519-dalek = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
 num-bigint = { version = "0.4.6", features = ["serde"] }
+num-integer = "0.1.46"
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 ruint = { workspace = true, features = ["num-bigint"] }

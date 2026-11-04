@@ -3,12 +3,22 @@
 //!
 //! The key pair is derived from a secret rather than generated, so a wallet restores it from
 //! its seed like the viewing key. Encapsulation randomness is drawn by the caller.
+//!
+//! [`KemEncapsulationKey::encapsulate_uniform`] and [`KemKeyPair::decapsulate_uniform`] carry
+//! the ciphertext in its Kemeleon encoding ([`crate::crypto::kemeleon`]), bytes that look
+//! random, as the hybrid note format needs to mask it.
 
 use std::fmt;
 
 use libcrux_ml_kem::mlkem768::{self, MlKem768Ciphertext, MlKem768PrivateKey, MlKem768PublicKey};
+use rand::{CryptoRng, RngExt};
 use sha2::{Digest, Sha512};
 use thiserror::Error;
+
+use crate::crypto::kemeleon;
+
+/// Size of a Kemeleon-encoded ciphertext.
+pub const UNIFORM_CIPHERTEXT_SIZE: usize = kemeleon::ENCODED_SIZE;
 
 pub const ENCAPSULATION_KEY_SIZE: usize = 1184;
 pub const DECAPSULATION_KEY_SIZE: usize = 2400;
@@ -69,6 +79,15 @@ impl KemKeyPair {
         let private_key = MlKem768PrivateKey::from(self.decapsulation_key);
         mlkem768::decapsulate(&private_key, &MlKem768Ciphertext::from(ciphertext.0))
     }
+
+    /// [`Self::decapsulate`] of a Kemeleon-encoded ciphertext. Any bytes decode, so bytes that
+    /// were not encoded for this key also yield an unrelated secret.
+    pub fn decapsulate_uniform(
+        &self,
+        encoded: &[u8; UNIFORM_CIPHERTEXT_SIZE],
+    ) -> [u8; SHARED_SECRET_SIZE] {
+        self.decapsulate(&kemeleon::decode(encoded))
+    }
 }
 
 impl KemEncapsulationKey {
@@ -99,6 +118,21 @@ impl KemEncapsulationKey {
         let (ciphertext, shared_secret) =
             mlkem768::encapsulate(&MlKem768PublicKey::from(self.0), randomness);
         (KemCiphertext(*ciphertext.as_slice()), shared_secret)
+    }
+
+    /// [`Self::encapsulate`] with the ciphertext Kemeleon-encoded, indistinguishable from
+    /// random bytes under MLWE. Encoding fails for about one ciphertext in four; this
+    /// encapsulates again until it succeeds.
+    pub fn encapsulate_uniform(
+        &self,
+        rng: &mut dyn CryptoRng,
+    ) -> ([u8; UNIFORM_CIPHERTEXT_SIZE], [u8; SHARED_SECRET_SIZE]) {
+        loop {
+            let (ciphertext, shared_secret) = self.encapsulate(rng.random());
+            if let Some(encoded) = kemeleon::encode(&ciphertext, rng) {
+                return (encoded, shared_secret);
+            }
+        }
     }
 }
 
@@ -172,5 +206,20 @@ mod tests {
             KemCiphertext::from_slice(&[0u8; 10]),
             Err(KemError::InvalidCiphertext)
         );
+    }
+
+    #[test]
+    fn uniform_encapsulation_round_trips() {
+        use rand::SeedableRng;
+        let mut rng = rand_chacha::ChaChaRng::seed_from_u64(8);
+        let a = KemKeyPair::derive(b"secret");
+        for _ in 0..20 {
+            let (encoded, secret) = a.encapsulation_key().encapsulate_uniform(&mut rng);
+            assert_eq!(a.decapsulate_uniform(&encoded), secret);
+            assert_ne!(
+                KemKeyPair::derive(b"other").decapsulate_uniform(&encoded),
+                secret
+            );
+        }
     }
 }

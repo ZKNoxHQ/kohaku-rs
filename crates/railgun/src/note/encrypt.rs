@@ -59,9 +59,10 @@ pub enum NoteEncryption {
     /// Railgun wallet.
     #[default]
     Legacy,
-    /// The same ECDH combined with ML-KEM-768 to the receiver's encapsulation key, no curve
-    /// point in the clear. Only wallets with the matching key pair read the note. See
-    /// [`hybrid`].
+    /// The same ECDH combined with ML-KEM-768 to the receiver's encapsulation key, under a
+    /// mask from an ephemeral ECDH: telling who a note is for takes breaking ML-KEM and, for
+    /// a classical attacker, the ECDH too. Only wallets with the matching key pair read the
+    /// note. See [`hybrid`].
     HybridPq {
         receiver_kem_key: KemEncapsulationKey,
     },
@@ -424,7 +425,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(encrypted.annotationData.len(), hybrid::TEST_ANNOTATION_SIZE);
-        assert_eq!(&encrypted.annotationData[..5], b"RGPQ\x01");
+        assert_eq!(&encrypted.annotationData[..5], b"RGPQ\x02");
         assert_eq!(encrypted.memo.len(), 4);
 
         let on_chain = |encrypted: &CommitmentCiphertext| syncer::Transact {

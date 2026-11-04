@@ -1,5 +1,6 @@
 pub(crate) mod aes;
 pub mod kem;
+pub(crate) mod kemeleon;
 pub mod keys;
 pub(crate) mod railgun_base_37;
 pub mod railgun_txid;

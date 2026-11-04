@@ -5435,6 +5435,7 @@ dependencies = [
  "kohaku-userop-kit",
  "libcrux-ml-kem",
  "num-bigint 0.4.8",
+ "num-integer",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "reqwest 0.13.4",
